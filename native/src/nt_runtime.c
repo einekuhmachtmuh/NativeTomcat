@@ -1,9 +1,9 @@
 #include "nt_runtime.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -67,6 +67,9 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		return -1;
 	}
 
+	value->listener_fd = -1;
+	value->epoll_fd = -1;
+	value->max_events = config->max_events;
 	value->listener_fd = nt_create_listener(config);
 	if (value->listener_fd == -1) {
 		free(value);
@@ -80,7 +83,6 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		return -1;
 	}
 
-	value->max_events = config->max_events;
 	struct epoll_event event;
 	memset(&event, 0, sizeof(event));
 	event.events = EPOLLIN;
