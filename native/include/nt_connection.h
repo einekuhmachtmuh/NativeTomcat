@@ -26,6 +26,7 @@ void nt_connection_destroy(nt_connection_t *connection);
 
 #ifdef __cplusplus
 }
+
 #endif
 
 #endif
