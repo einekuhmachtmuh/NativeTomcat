@@ -1,16 +1,20 @@
 # Native connection contract
 
-## Scope
+## 1. Scope and status
 
-This document defines the first NativeTomcat native connection ownership layer. It does not claim Servlet, Tomcat `SocketWrapperBase`, HTTP, TLS, or JNI compatibility yet.
+This document defines the native transport object `nt_connection_t`: descriptor ownership, state, non-blocking I/O and thread boundary. It does not establish Tomcat `SocketWrapperBase`, Servlet, HTTP, TLS, or final JNI semantics.
 
-## Ownership
+The current implementation already provides one-shot native read/write primitives and connection lifecycle management. Higher layers must still define how those primitives are scheduled and how their results become Tomcat transport state.
 
-`nt_connection_t` owns the accepted socket file descriptor for its lifetime. The descriptor is not owned by the caller after successful `nt_connection_create()`.
+## 2. Ownership
 
-The connection object owns only transport state. Epoll registration remains a runtime/event-loop responsibility and is intentionally not part of the connection API.
+`nt_connection_t` owns the accepted socket file descriptor after successful creation and until close.
 
-## State
+The epoll instance and interest mask are owned by `nt_runtime_t`; they are deliberately outside the connection object API.
+
+The Java layer receives, at most, an opaque native handle. It does not receive ownership of the descriptor and must never close the descriptor directly.
+
+## 3. Lifecycle
 
 The native state machine is:
 
@@ -18,34 +22,79 @@ The native state machine is:
 ACTIVE -> CLOSING -> CLOSED
 ```
 
-`nt_connection_close()` is idempotent for the connection state and closes the owned descriptor only for the successful `ACTIVE -> CLOSING` transition.
+`nt_connection_close()` is idempotent at the connection-state level. `nt_connection_destroy()` is a final memory-lifetime operation and must not run while another operation can still access the connection.
 
-## I/O
+The current runtime retains connection objects until event-loop shutdown so that `epoll_event.data.ptr` cannot become a dangling pointer during the active loop.
 
-`nt_connection_read()` and `nt_connection_write()` perform one non-blocking transport operation and return the system-call result through `ssize_t *result`.
+## 4. I/O contract
 
-A successful result of zero is preserved as an I/O result rather than being converted into an application-level state transition. EOF interpretation remains a higher layer concern.
+`nt_connection_read()` and `nt_connection_write()` perform one non-blocking transport operation and return the underlying operation result through the native API.
 
-Transport errors that unambiguously indicate a broken connection transition the state to `CLOSING`. The caller remains responsible for invoking `nt_connection_close()` and ultimately `nt_connection_destroy()`.
+The native layer distinguishes successful byte transfer from would-block and terminal/error conditions. EOF interpretation at the HTTP/Tomcat layer remains separate from the low-level system-call result.
 
-## Threading boundary
+The current implementation retries `EINTR` inside the native operation. The final JNI ABI must preserve enough information to distinguish interruption from `EAGAIN`/`EWOULDBLOCK` if the higher layer needs that distinction.
 
-The current API does not promise that a connection object may be destroyed concurrently with an I/O operation. Such concurrency requires a higher-level owner/dispatch protocol before it can be supported safely.
+## 5. Event-loop relationship
 
-The event loop owns readiness registration and dispatch. The connection object does not call into Java and does not own a Java thread or `JNIEnv`.
+The connection object does not own readiness registration. The runtime owns:
 
-## Deliberate omissions
+- epoll registration;
+- event dispatch;
+- `EPOLLONESHOT` rearm;
+- wakeup coordination;
+- the event-loop execution context.
 
-The first contract does not include:
+Therefore a successful `nt_connection_read()` does not itself rearm epoll, and a Java thread must not bypass the runtime owner to mutate registration.
 
-- epoll registration or interest masks;
-- native HTTP parsing;
-- native buffering beyond the kernel socket;
-- TLS;
-- sendfile;
-- Java object references;
-- JNI handles;
-- Tomcat `SocketWrapperBase` subclassing;
-- Servlet readiness semantics.
+## 6. Threading
 
-These are separate contracts and must be verified before implementation.
+The current API does not guarantee that connection destruction may race with I/O. The event-loop owner is the default authority for connection mutation and I/O.
+
+Cross-thread operations require an explicit dispatch protocol. `nt_runtime_stop()` is currently the supported cross-thread shutdown request; it does not make arbitrary connection operations thread-safe.
+
+Once Java transport operations are introduced, the project must specify whether the native I/O occurs on the event-loop thread or is marshalled there, and how completion is reported back to Java.
+
+## 7. Native/Java boundary
+
+The current JNI event path carries an opaque connection handle and an event mask. It does not yet provide the complete transport API needed by `NativeSocketWrapper`.
+
+The next JNI transport surface is expected to cover, at minimum:
+
+- non-blocking read into a bounded Java `ByteBuffer` window;
+- non-blocking write from a bounded Java `ByteBuffer` window;
+- connection close request;
+- event-interest/rearm request through the native owner;
+- unambiguous result/status mapping.
+
+The exact signatures must be derived from the actual `SocketWrapperBase` methods and the chosen event-loop ownership model; they must not be frozen from this document alone.
+
+## 8. Error and EOF semantics
+
+A peer read-half-close, orderly EOF, transport error and local close are distinct transport facts. They may lead to the same final connection state, but the Tomcat protocol layer must receive enough information to decide whether pending response output, keep-alive, upgrade or error handling remains possible.
+
+The native layer must not unilaterally equate `EPOLLRDHUP` with immediate destruction.
+
+## 9. Explicit non-claims
+
+This contract does not claim:
+
+- one read equals one HTTP request;
+- one write equals complete peer delivery;
+- native readiness equals Servlet readiness;
+- native connection lifetime equals Tomcat wrapper lifetime;
+- JNI event dispatch equals Tomcat `processSocket()` execution;
+- current connection retention is the final memory-reclamation scheme.
+
+## 10. Required verification before ABI freeze
+
+Before freezing the JNI transport ABI, executable tests must cover:
+
+- partial read/write;
+- `EAGAIN`/`EWOULDBLOCK`;
+- `EINTR`;
+- EOF and peer half-close;
+- reset/error;
+- close during pending output;
+- exactly-once event/rearm behavior;
+- connection destruction only after all Java/native users have released the object;
+- direct-buffer and fallback-buffer paths where applicable.
