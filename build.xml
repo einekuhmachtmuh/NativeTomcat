@@ -15,13 +15,21 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 -->
+<!-- Mandatory rule: before migrating a Tomcat Java source file, check whether the exact path already exists under java/. -->
 <project name="NativeTomcat" default="java-compile" basedir=".">
 
 	<!--
-		The upstream Tomcat Ant build remains the authoritative build for
-		Tomcat itself. This top-level file provides NativeTomcat's minimal
-		Java smoke-build target and explicit delegation gates to the pinned
-		upstream Tomcat build. It must not replace upstream build.xml.
+		MANDATORY SOURCE-MIGRATION RULE: any Tomcat Java source materially involved in
+		implementation/planning/verification must first be copied to java/ at its exact
+		original package path, and this build file must then be updated to account for it.
+	-->
+	<!--
+		FORMAL BUILD: build.xml is the NativeTomcat formal build entry point.
+		BUILD VERIFICATION: build_test.xml is reserved for intermediate,
+		component-level verification while the Tomcat Java source tree is being
+		migrated and modified. build.xml must not depend on build_test.xml.
+		The pinned upstream Tomcat build remains an explicit compatibility gate
+		until the migrated NativeTomcat Java tree is complete.
 	-->
 	<property name="java.home" value="${java.home}" />
 	<property environment="env" />
