@@ -71,7 +71,7 @@ Cross-thread shutdown currently uses `nt_runtime_stop()`. It does not authorize 
 
 Accepted sockets use `EPOLLONESHOT`. After an event is delivered, the registration is disabled until an explicit rearm.
 
-The ownership rule is therefore:
+The ownership rule is:
 
 ```text
 kernel readiness
@@ -81,9 +81,17 @@ kernel readiness
     -> native event-loop owner rearms exactly once
 ```
 
-The current code has a transitional mismatch here: the JNI dispatch currently queues Java work and the native callback can rearm before that Java work has consumed the connection. This is **not** the final ownership contract. The code must be corrected before native transport integration relies on `EPOLLONESHOT` as a back-pressure mechanism.
+The current `native/src/main.c` deliberately stops before the rearm step when it dispatches asynchronously to Java. It no longer rearms merely because `nt_jvm_dispatch_event()` returned successfully.
 
-In particular, `Java task submitted` must not be treated as `transport consumed`.
+Therefore the current state is safe but intentionally incomplete:
+
+```text
+epoll event -> JNI enqueue -> no rearm
+```
+
+A connection remains one-shot disabled until the real transport/Tomcat consumer exists. This prevents the event loop from generating repeated readiness notifications faster than Java can consume the connection.
+
+`Java task submitted` must not be treated as `transport consumed`.
 
 ## 7. JNI boundary
 
@@ -149,7 +157,8 @@ The native runtime test currently verifies the implemented runtime behavior. The
 - deferred connection reclamation/generation scheme;
 - TLS ownership;
 - sendfile and vectored I/O;
-- final JNI/global-reference destruction protocol.
+- final JNI/global-reference destruction protocol;
+- cross-thread rearm/interest-change marshalling from Java to the native event-loop owner.
 
 ## 10. Contract boundary
 
