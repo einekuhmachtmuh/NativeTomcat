@@ -264,8 +264,13 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 				continue;
 			}
 
-			if ((events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+			if ((events[i].events & EPOLLERR) != 0) {
 				nt_connection_close(connection);
+				continue;
+			}
+
+			if ((events[i].events & (EPOLLRDHUP | EPOLLHUP)) != 0) {
+				nt_connection_mark_peer_read_closed(connection);
 			}
 		}
 	}
