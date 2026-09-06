@@ -25,7 +25,7 @@ void nt_connection_close(nt_connection_t *connection);
 void nt_connection_destroy(nt_connection_t *connection);
 
 #ifdef __cplusplus
-extern "C" {
+}
 #endif
 
 #endif
