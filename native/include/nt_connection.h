@@ -1,9 +1,9 @@
 #ifndef NT_CONNECTION_H
 #define NT_CONNECTION_H
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +28,5 @@ void nt_connection_destroy(nt_connection_t *connection);
 
 #ifdef __cplusplus
 }
-#endif
 
 #endif
