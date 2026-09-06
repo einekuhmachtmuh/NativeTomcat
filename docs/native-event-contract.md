@@ -78,15 +78,19 @@ native epoll thread
 
 This is a concurrency boundary, not yet a Tomcat transport boundary. The queued task currently stops before `SocketWrapperBase`, `AbstractEndpoint.processSocket()`, `SocketProcessorBase`, and `Http11Processor`.
 
-## 7. Critical current mismatch
+## 7. Current EPOLLONESHOT state
 
-The design contract requires rearm after the consumer has completed the current event-processing step. The current native callback can instead rearm immediately after JNI dispatch, while `NativeEventDispatcher` has only queued Java work.
+The previous native callback rearmed immediately after `nt_jvm_dispatch_event()`. That was inconsistent with this contract because JNI dispatch only queues Java work.
 
-Therefore the repository currently has a **known ownership gap**:
+The implementation has now been corrected: the NativeTomcat connection handler **does not rearm after asynchronous Java dispatch**. It only closes on dispatch failure or terminal peer/error events.
+
+Consequently a connection that reaches the current Java event-dispatch boundary remains one-shot disabled until a real transport/Tomcat consumption path is implemented. This is intentional and safer than falsely treating Java task submission as consumption.
+
+The required integrated model remains:
 
 ```text
-current implementation:
-  epoll event -> JNI enqueue -> immediate rearm
+current safe boundary:
+  epoll event -> JNI enqueue -> no rearm
 
 required integrated model:
   epoll event -> ownership transfer/dispatch
@@ -95,7 +99,7 @@ required integrated model:
              -> exactly one rearm by native event-loop owner
 ```
 
-This mismatch must be fixed before the event contract is treated as an implemented back-pressure mechanism. It is a documentation/code alignment issue, not evidence that Tomcat integration is already working.
+This means the current native listener is **not yet an end-to-end transport path**. The missing rearm is an explicit integration gate, not an implementation detail to hide in the dispatcher.
 
 ## 8. Write-interest rule
 
@@ -156,10 +160,10 @@ This supports the NativeTomcat separation of readiness detection, native event h
 
 Before the next transport integration step:
 
-1. resolve the `EPOLLONESHOT` rearm ownership gap;
-2. define native read/write/close/rearm operations required by the Java adapter;
+1. implement the actual native transport-consumption path;
+2. define how completion requests the next interest set from the native event-loop owner;
 3. map native handles to a stable Java transport object and lifetime;
 4. connect the object to the real Tomcat `processSocket()` / `SocketProcessor` path;
-5. test event coalescing, serialization, partial I/O, close/error, and rearm behavior.
+5. test event coalescing, serialization, partial I/O, close/error, and exactly-once rearm behavior.
 
 Only then should `Http11Processor` become an integration target.
