@@ -110,24 +110,24 @@ static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
 	for (;;) {
 		int client = accept4(runtime->listener_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 		if (client == -1) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-				if (errno == EINTR) {
-					continue;
-				}
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
 				break;
+			}
+			if (errno == EINTR) {
+				continue;
 			}
 			break;
 		}
 
 		nt_connection_t *connection = NULL;
-		if (nt_connection_create(&connection, client) == -1) {
+		if (nt_connection_create(&connection, runtime, client) == -1) {
 			close(client);
 			continue;
 		}
 
 		struct epoll_event event;
 		memset(&event, 0, sizeof(event));
-		event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
+		event.events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
 		event.data.ptr = connection;
 		if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, client, &event) == -1) {
 			nt_connection_destroy(connection);
@@ -205,6 +205,26 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	return 0;
 }
 
+int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write) {
+	if (runtime == NULL || connection == NULL || nt_connection_get_runtime(connection) != runtime) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
+		errno = EBADF;
+		return -1;
+	}
+
+	struct epoll_event event;
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
+	if (want_write) {
+		event.events |= EPOLLOUT;
+	}
+	event.data.ptr = connection;
+	return epoll_ctl(runtime->epoll_fd, EPOLL_CTL_MOD, nt_connection_get_fd(connection), &event);
+}
+
 int nt_runtime_run(nt_runtime_t *runtime) {
 	if (runtime == NULL) {
 		errno = EINVAL;
@@ -246,7 +266,6 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 
 			if ((events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
 				nt_connection_close(connection);
-				continue;
 			}
 		}
 	}
