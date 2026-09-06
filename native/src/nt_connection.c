@@ -7,12 +7,13 @@
 #include <unistd.h>
 
 struct nt_connection {
+	nt_runtime_t *runtime;
 	int fd;
 	atomic_int state;
 };
 
-int nt_connection_create(nt_connection_t **connection, int fd) {
-	if (connection == NULL || fd < 0) {
+int nt_connection_create(nt_connection_t **connection, nt_runtime_t *runtime, int fd) {
+	if (connection == NULL || runtime == NULL || fd < 0) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -22,6 +23,7 @@ int nt_connection_create(nt_connection_t **connection, int fd) {
 		return -1;
 	}
 
+	value->runtime = runtime;
 	value->fd = fd;
 	atomic_init(&value->state, NT_CONNECTION_ACTIVE);
 	*connection = value;
@@ -34,6 +36,13 @@ int nt_connection_get_fd(const nt_connection_t *connection) {
 		return -1;
 	}
 	return connection->fd;
+}
+
+nt_runtime_t *nt_connection_get_runtime(const nt_connection_t *connection) {
+	if (connection == NULL) {
+		return NULL;
+	}
+	return connection->runtime;
 }
 
 nt_connection_state_t nt_connection_get_state(const nt_connection_t *connection) {
