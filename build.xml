@@ -102,8 +102,8 @@
 			<arg value="-Wextra" />
 			<arg value="-Wpedantic" />
 			<arg value="-I${basedir}/native/include" />
-			<arg value="-I${env.JAVA_HOME}/include" />
-			<arg value="-I${env.JAVA_HOME}/include/linux" />
+			<arg value="-I${java.home}/include" />
+			<arg value="-I${java.home}/include/linux" />
 			<arg value="-pthread" />
 			<arg value="-o" />
 			<arg value="${native.executable}" />
