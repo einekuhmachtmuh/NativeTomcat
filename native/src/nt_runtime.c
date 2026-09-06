@@ -4,7 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +18,7 @@ struct nt_runtime {
 	int epoll_fd;
 	int wake_fd;
 	int max_events;
-	volatile sig_atomic_t stop_requested;
+	atomic_bool stop_requested;
 };
 
 static int nt_set_nonblocking(int fd) {
@@ -75,6 +75,8 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->epoll_fd = -1;
 	value->wake_fd = -1;
 	value->max_events = config->max_events;
+	atomic_init(&value->stop_requested, false);
+
 	value->listener_fd = nt_create_listener(config);
 	if (value->listener_fd == -1) {
 		free(value);
@@ -132,7 +134,7 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 		return -1;
 	}
 
-	while (!runtime->stop_requested) {
+	while (!atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) {
 		int count = epoll_wait(runtime->epoll_fd, events, runtime->max_events, -1);
 		if (count == -1) {
 			if (errno == EINTR) {
@@ -176,7 +178,7 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 
 void nt_runtime_stop(nt_runtime_t *runtime) {
 	if (runtime != NULL) {
-		runtime->stop_requested = 1;
+		atomic_store_explicit(&runtime->stop_requested, true, memory_order_release);
 		if (runtime->wake_fd != -1) {
 			uint64_t value = 1;
 			ssize_t result = write(runtime->wake_fd, &value, sizeof(value));
