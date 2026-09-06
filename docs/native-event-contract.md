@@ -99,13 +99,17 @@ terminal event:
   epoll event -> JNI enqueue -> no rearm / no immediate close
 
 required integrated model:
-  epoll event -> ownership transfer/dispatch
-             -> actual transport/Tomcat consumption
-             -> next interest/close decision
-             -> exactly one native-owner action
+  epoll event
+      -> stable native-handle ↔ Java transport object
+      -> real SocketWrapperBase
+      -> AbstractEndpoint.processSocket()
+      -> SocketProcessorBase
+      -> actual transport/Tomcat consumption
+      -> native event-loop owner determines next interest/close
+      -> exactly one rearm / close
 ```
 
-This is intentionally incomplete. It prevents the current asynchronous Java boundary from pretending that event submission equals transport consumption or connection completion.
+The arrows above are the required ownership sequence, not a claim that the path is already implemented. Each boundary must be independently source-verified and tested before the next is enabled.
 
 ## 8. Write-interest rule
 
@@ -164,12 +168,17 @@ This supports the NativeTomcat separation of readiness detection, native event h
 
 ## 13. Next gate
 
-Before the next transport integration step:
+The mandatory order is now explicit:
 
-1. implement the actual native transport-consumption path;
-2. define how completion requests the next interest set or close from the native event-loop owner;
-3. map native handles to a stable Java transport object and lifetime;
-4. connect the object to the real Tomcat `processSocket()` / `SocketProcessor` path;
-5. test event coalescing, serialization, partial I/O, close/error, and exactly-once rearm/close behavior.
+1. migrate and verify the exact pinned Tomcat `SocketWrapperBase` source at its original package/path;
+2. migrate only the supporting Tomcat source closure required by that real class, recursively applying the same source rule;
+3. adapt `NativeSocketWrapper` to the real wrapper contract without prematurely enabling deferred features;
+4. define the stable native-handle ↔ Java transport-object lifetime and registry;
+5. connect the real wrapper to `AbstractEndpoint.processSocket()`;
+6. connect the real `SocketProcessorBase` execution path;
+7. implement native transport consumption through the wrapper;
+8. marshal the next native interest/close decision to the native event-loop owner;
+9. verify exactly one rearm or close for each completed event-processing cycle;
+10. only after that, continue to `ProtocolHandler` / `Http11Processor`.
 
-Only then should `Http11Processor` become an integration target.
+No step may be skipped because the current shell or a surface test appears to work.
