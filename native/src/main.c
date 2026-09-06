@@ -16,6 +16,10 @@ static void native_connection_handler(nt_runtime_t *runtime, nt_connection_t *co
 		nt_connection_close(connection);
 		return;
 	}
+	if ((events & (NT_RUNTIME_EVENT_PEER_READ_CLOSED | NT_RUNTIME_EVENT_ERROR)) != 0) {
+		nt_connection_close(connection);
+		return;
+	}
 	if (nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE &&
 			nt_runtime_rearm_connection(runtime, connection, false) != 0) {
 		nt_connection_close(connection);

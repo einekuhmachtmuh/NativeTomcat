@@ -43,9 +43,18 @@ public final class NativeTomcatBootstrap {
 		Bootstrap instance = new Bootstrap();
 		instance.init(args == null ? new String[0] : args);
 		instance.start();
-		eventDispatcher = new NativeEventDispatcher(resolveTomcatExecutor(instance),
-				NativeTomcatBootstrap::processNativeEvent);
-		bootstrap = instance;
+		try {
+			Executor executor = resolveTomcatExecutor(instance);
+			eventDispatcher = new NativeEventDispatcher(executor, NativeTomcatBootstrap::processNativeEvent);
+			bootstrap = instance;
+		} catch (Exception e) {
+			try {
+				instance.stop();
+			} catch (Exception stopFailure) {
+				e.addSuppressed(stopFailure);
+			}
+			throw e;
+		}
 	}
 
 	/**
