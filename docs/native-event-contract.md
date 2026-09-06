@@ -1,84 +1,165 @@
 # Native connection event contract
 
-## Scope
+## 1. Scope and verification status
 
-The current native transport layer uses Linux `epoll` with level-triggered listener/wakeup monitoring and `EPOLLONESHOT` monitoring for accepted connections.
+The current native transport layer uses Linux `epoll`. Listener and wakeup monitoring are level-triggered; accepted connections use `EPOLLONESHOT`.
 
-## Ownership
+This document defines the boundary between kernel readiness and the NativeTomcat event dispatcher. It does not define Servlet readiness, HTTP parsing, or complete Tomcat transport semantics.
 
-- `nt_runtime_t` owns the lifetime of `nt_connection_t` objects.
-- `nt_connection_t` owns its accepted socket file descriptor.
-- A connection stores a non-owning pointer to its owning runtime so event rearming can reject connections belonging to another runtime.
-- The Java layer does not receive the socket file descriptor.
+Status terms used here:
 
-## Connection registration
+- **implemented** — present in repository code;
+- **source-verified** — checked against the pinned external source/specification;
+- **tested** — exercised by an executable test;
+- **deferred** — intentionally not implemented;
+- **blocked** — required verification cannot currently be executed in the local environment.
+
+## 2. Registration contract
 
 Accepted sockets are registered with:
 
-- `EPOLLIN`
-- `EPOLLRDHUP`
-- `EPOLLONESHOT`
+- `EPOLLIN`;
+- `EPOLLRDHUP`;
+- `EPOLLONESHOT`.
 
-`EPOLLOUT` is added only when a caller explicitly requests write readiness through `nt_runtime_rearm_connection()`.
+`EPOLLOUT` is not a permanent interest bit. It is intended to be armed only when the transport layer has pending output that currently requires write readiness.
 
-## Why EPOLLONESHOT is used now
+The runtime, not Java code, owns epoll registration and rearm operations.
 
-The current runtime has no HTTP parser or application-consumption callback. Leaving accepted sockets in ordinary level-triggered `EPOLLIN` mode while not consuming input would repeatedly report the same readable socket and can create a busy loop.
+## 3. Why EPOLLONESHOT is used
 
-`EPOLLONESHOT` therefore makes delivery of a readiness notification a one-shot handoff. The consumer must explicitly rearm the connection after it has processed the event. Linux documents that `EPOLLONESHOT` disables the descriptor after notification and requires `EPOLL_CTL_MOD` to rearm it.
+At the current stage there is no native HTTP parser or completed Java transport-consumption path. Ordinary level-triggered `EPOLLIN` could repeatedly report an unread socket and produce a busy loop.
 
-## Current event behavior
+`EPOLLONESHOT` makes each readiness delivery a one-shot handoff. After notification, the connection remains disabled until an explicit `EPOLL_CTL_MOD` rearm.
 
-- Listener readiness: accept all available connections until `EAGAIN`/`EWOULDBLOCK`.
-- Wake readiness: drain the eventfd.
-- Connection error/hangup/read-half-close: transition the connection toward closed state.
-- Connection readable/writable without an error: the runtime currently does not consume application data. This is deliberate; HTTP parsing and buffer ownership are not implemented yet.
-- The caller may rearm a live connection with read interest and, when required by pending output, write interest.
+The important ownership distinction is:
 
-## Important limitation
+```text
+readiness notification != data consumption != Java task submission
+```
 
-`nt_runtime_rearm_connection()` currently assumes the caller obeys the event-loop ownership model. `nt_runtime_destroy()` must not run concurrently with `nt_runtime_run()`. Cross-thread event requests and their wakeup/serialization mechanism will be defined before JNI exposes this API.
+Rearm must correspond to completion of the event-processing contract, not merely to successful queuing of Java work.
 
-## Next layer
+## 4. Event translation
 
-The next native layer should define the connection input/output buffer contract before implementing HTTP parsing. In particular, it must specify:
+The native callback exposes an event mask:
 
-1. whether a read buffer is owned by C or borrowed by Java;
-2. how partial reads and partial writes are represented;
-3. when `EPOLLOUT` is armed/disarmed;
-4. how a Java consumer requests rearming without racing the event-loop owner;
-5. how close/error events are propagated exactly once.
+| Native condition | Runtime event |
+|---|---|
+| `EPOLLIN` | `NT_RUNTIME_EVENT_READABLE` |
+| `EPOLLOUT` | `NT_RUNTIME_EVENT_WRITABLE` |
+| `EPOLLRDHUP` / `EPOLLHUP` | `NT_RUNTIME_EVENT_PEER_READ_CLOSED` |
+| `EPOLLERR` | `NT_RUNTIME_EVENT_ERROR` |
 
-## 10. Connection event dispatch boundary
+These are transport events. They are not `SocketEvent` values and are not Servlet listener callbacks.
 
-The runtime now exposes a native connection-event callback. The callback receives a bitmask containing:
+Mapping to Tomcat `SocketEvent` must occur only after the real `SocketWrapperBase`/`AbstractEndpoint.processSocket()` integration has been established.
 
-- `NT_RUNTIME_EVENT_READABLE` for `EPOLLIN`;
-- `NT_RUNTIME_EVENT_WRITABLE` for `EPOLLOUT`;
-- `NT_RUNTIME_EVENT_PEER_READ_CLOSED` for `EPOLLRDHUP` or `EPOLLHUP`;
-- `NT_RUNTIME_EVENT_ERROR` for `EPOLLERR`.
+## 5. Native callback boundary
 
-The callback executes on the native event-loop thread. It owns the current event-processing step and may perform non-blocking connection I/O. Because accepted sockets use `EPOLLONESHOT`, the callback (or the future dispatch owner after it has completed its work) must explicitly call `nt_runtime_rearm_connection()` exactly once when the connection remains active. This callback is therefore an event-ownership boundary, not a Servlet callback.
+The callback executes on the native event-loop thread. At this boundary the native runtime owns the current readiness notification and remains responsible for native registration state.
 
-This is intentionally not a Java callback yet. It establishes the missing native event-dispatch boundary without conflating kernel readiness with Servlet readiness or bypassing Tomcat's processor/executor model.
+The callback may perform non-blocking native work when that work is part of the established native event-processing contract. It must not assume that Java execution has already consumed the socket merely because JNI returned successfully.
 
-## 11. Native event-loop to Tomcat Executor hand-off
+## 6. Current JNI hand-off
 
-The native event-loop callback now has a JNI hand-off path. The ownership split is:
+The current path is:
 
 ```text
 native epoll thread
     -> JNI attach
     -> NativeTomcatBootstrap.dispatchNativeEvent()
     -> NativeEventDispatcher
-    -> Tomcat connector ProtocolHandler.getExecutor()
-    -> Executor.execute(Runnable)
+    -> Tomcat connector Executor
+    -> queued Java work
 ```
 
-The native event-loop thread does not execute the Java processing task. It submits the event to the Tomcat-owned Executor and then retains ownership of the native epoll registration, including `EPOLLONESHOT` re-arming.
+`NativeEventDispatcher` coalesces event masks for one native handle and serializes Java tasks for that handle.
 
-`NativeEventDispatcher` coalesces events for the same native connection handle and guarantees that only one task for that handle is executing at a time. This mirrors the important concurrency property of Tomcat's `SocketProcessorBase.run()`, which serializes processing for a `SocketWrapperBase` by acquiring its connection lock.
+This is a concurrency boundary, not yet a Tomcat transport boundary. The queued task currently stops before `SocketWrapperBase`, `AbstractEndpoint.processSocket()`, `SocketProcessorBase`, and `Http11Processor`.
 
-The current task body deliberately stops at the transport-dispatch boundary. It does not pretend that a native handle is already a `SocketWrapperBase`, and it does not invoke `Http11Processor` directly. The next integration step must construct the real `SocketWrapperBase`-compatible transport object and use Tomcat's existing `processSocket` / `SocketProcessor` path.
+## 7. Critical current mismatch
 
-For now the native runtime re-arms read interest only. Write interest must be armed only when the eventual transport adapter has an explicit pending-write state; re-arming `EPOLLOUT` merely because an earlier write event occurred would create a busy loop.
+The design contract requires rearm after the consumer has completed the current event-processing step. The current native callback can instead rearm immediately after JNI dispatch, while `NativeEventDispatcher` has only queued Java work.
+
+Therefore the repository currently has a **known ownership gap**:
+
+```text
+current implementation:
+  epoll event -> JNI enqueue -> immediate rearm
+
+required integrated model:
+  epoll event -> ownership transfer/dispatch
+             -> actual transport/Tomcat consumption
+             -> next interest set
+             -> exactly one rearm by native event-loop owner
+```
+
+This mismatch must be fixed before the event contract is treated as an implemented back-pressure mechanism. It is a documentation/code alignment issue, not evidence that Tomcat integration is already working.
+
+## 8. Write-interest rule
+
+`EPOLLOUT` must be armed only when a real transport write queue contains bytes that could not currently be written without blocking.
+
+Receiving an `EPOLLOUT` event is not itself a reason to keep `EPOLLOUT` armed. Once pending output has been drained, write interest must be removed from the next registration state.
+
+This avoids the classic writable-socket busy loop.
+
+## 9. Readiness layering
+
+The project must preserve three distinct layers:
+
+```text
+Linux kernel readiness
+        |
+        v
+Native event handling / rearm
+        |
+        v
+Tomcat socket transport + processor state
+        |
+        v
+Servlet non-blocking readiness and listener callbacks
+```
+
+Thus:
+
+`EPOLLIN != SocketEvent.OPEN_READ != ServletInputStream.isReady()`
+
+and
+
+`EPOLLOUT != SocketEvent.OPEN_WRITE != ServletOutputStream.isReady()`.
+
+A native event may cause Java to attempt processing, but only Tomcat/Servlet state determines the application-visible result.
+
+## 10. Cross-thread rule
+
+A Java worker thread must not directly perform `epoll_ctl` against event-loop-owned registration as a shortcut.
+
+If Java needs a change to native interest, close, or another event-loop-owned operation, the request must be marshalled to the native event-loop owner through an explicit queue/wakeup mechanism. The ordering and acknowledgement protocol are deferred until the JNI transport bridge is designed.
+
+## 11. Failure and terminal events
+
+Error, peer half-close, and full close must be represented separately until the Tomcat protocol layer establishes the correct response/keep-alive behavior.
+
+The native layer must not emit duplicate terminal callbacks merely because multiple epoll flags are present on one notification.
+
+The final exactly-once close propagation rule is deferred until native-handle lifetime is connected to the Java wrapper lifetime.
+
+## 12. NGINX cross-check
+
+NGINX is used only as an architectural cross-check. Its event subsystem separates event polling, read/write event registration and handler dispatch, and distinguishes level/one-shot/clear-event modes.
+
+This supports the NativeTomcat separation of readiness detection, native event handling, and higher-level processing. It does not establish Tomcat or Servlet requirements.
+
+## 13. Next gate
+
+Before the next transport integration step:
+
+1. resolve the `EPOLLONESHOT` rearm ownership gap;
+2. define native read/write/close/rearm operations required by the Java adapter;
+3. map native handles to a stable Java transport object and lifetime;
+4. connect the object to the real Tomcat `processSocket()` / `SocketProcessor` path;
+5. test event coalescing, serialization, partial I/O, close/error, and rearm behavior.
+
+Only then should `Http11Processor` become an integration target.
