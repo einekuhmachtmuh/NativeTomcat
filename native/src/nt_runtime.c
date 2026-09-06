@@ -5,15 +5,18 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 struct nt_runtime {
 	int listener_fd;
 	int epoll_fd;
+	int wake_fd;
 	int max_events;
 	volatile sig_atomic_t stop_requested;
 };
@@ -70,6 +73,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 
 	value->listener_fd = -1;
 	value->epoll_fd = -1;
+	value->wake_fd = -1;
 	value->max_events = config->max_events;
 	value->listener_fd = nt_create_listener(config);
 	if (value->listener_fd == -1) {
@@ -84,11 +88,29 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		return -1;
 	}
 
+	value->wake_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (value->wake_fd == -1) {
+		close(value->epoll_fd);
+		close(value->listener_fd);
+		free(value);
+		return -1;
+	}
+
 	struct epoll_event event;
 	memset(&event, 0, sizeof(event));
 	event.events = EPOLLIN;
 	event.data.fd = value->listener_fd;
 	if (epoll_ctl(value->epoll_fd, EPOLL_CTL_ADD, value->listener_fd, &event) == -1) {
+		close(value->wake_fd);
+		close(value->epoll_fd);
+		close(value->listener_fd);
+		free(value);
+		return -1;
+	}
+
+	event.data.fd = value->wake_fd;
+	if (epoll_ctl(value->epoll_fd, EPOLL_CTL_ADD, value->wake_fd, &event) == -1) {
+		close(value->wake_fd);
 		close(value->epoll_fd);
 		close(value->listener_fd);
 		free(value);
@@ -121,6 +143,13 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 		}
 
 		for (int i = 0; i < count; ++i) {
+			if (events[i].data.fd == runtime->wake_fd) {
+				uint64_t value;
+				while (read(runtime->wake_fd, &value, sizeof(value)) == sizeof(value)) {
+				}
+				continue;
+			}
+
 			if (events[i].data.fd != runtime->listener_fd) {
 				continue;
 			}
@@ -148,12 +177,20 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 void nt_runtime_stop(nt_runtime_t *runtime) {
 	if (runtime != NULL) {
 		runtime->stop_requested = 1;
+		if (runtime->wake_fd != -1) {
+			uint64_t value = 1;
+			ssize_t result = write(runtime->wake_fd, &value, sizeof(value));
+			(void)result;
+		}
 	}
 }
 
 void nt_runtime_destroy(nt_runtime_t *runtime) {
 	if (runtime == NULL) {
 		return;
+	}
+	if (runtime->wake_fd != -1) {
+		close(runtime->wake_fd);
 	}
 	if (runtime->epoll_fd != -1) {
 		close(runtime->epoll_fd);
