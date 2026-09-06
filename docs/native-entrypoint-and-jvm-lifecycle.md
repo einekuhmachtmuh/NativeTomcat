@@ -1,12 +1,18 @@
 # Native entry point and JVM lifecycle
 
-## 1. Architectural requirement
+## 1. Scope and status
 
-The target NativeTomcat process entry point is a native C `main()`.
+The target NativeTomcat process entry point is native C `main()`. This document defines process/JVM ownership and the current bootstrap boundary. It does not claim that embedded Tomcat startup or native-transport HTTP processing has been runtime-verified.
 
-The operating-system process must therefore enter NativeTomcat through C rather than through `org.apache.catalina.startup.Bootstrap.main()` as the process entry point.
+Evidence levels used below:
 
-The intended high-level lifecycle is:
+- **implemented** — repository code contains the path;
+- **source-verified** — the relevant Tomcat implementation was checked against pinned 11.0.25 source;
+- **compiled/tested** — an executable build/test path passed;
+- **runtime-verified** — the integrated behavior actually executed on a suitable host;
+- **deferred/blocked** — intentionally postponed or currently not executable.
+
+## 2. Target lifecycle
 
 ```text
 OS process
@@ -16,141 +22,145 @@ OS process
   -> Tomcat Java bootstrap/lifecycle
   -> native transport runtime
   -> coordinated shutdown
-  -> JVM shutdown
+  -> JVM destruction
   -> C process exit
 ```
 
-This document defines the lifecycle contract and records the current implementation boundary. It does not claim end-to-end runtime success until the required build-host tests have been executed.
+The current implementation reaches the JVM and Java bootstrap boundaries. The native transport is not yet integrated into Tomcat's real connector processing path.
 
-## 2. Verified upstream Tomcat lifecycle
+## 3. Tomcat lifecycle authority
 
-Tomcat 11.0.25 contains the normal Java bootstrap path under `org.apache.catalina.startup`.
+Tomcat 11.0.25's Java bootstrap/Catalina lifecycle remains the authority for Server, Service, Engine, Host, Context and application lifecycle semantics.
 
-`Catalina.load()` initializes naming, parses `server.xml`, obtains the `Server`, assigns Catalina/base/home state, redirects streams and invokes `Server.init()`.
+NativeTomcat must not reimplement these lifecycles in C merely to obtain a native process entry point.
 
-`Catalina.start()` loads the server when necessary and then starts the configured server lifecycle.
+## 4. Native process ownership
 
-The NativeTomcat bootstrap reuses Tomcat's existing `Bootstrap` and Catalina lifecycle machinery rather than reimplementing Server, Service, Engine, Host, Context or Servlet lifecycle in C.
+C owns:
 
-## 3. Native process ownership
+- OS process entry and exit status;
+- JVM creation/destruction through the Invocation API;
+- NativeTomcat native runtime initialization/shutdown;
+- native event-loop and native connection resources.
 
-The native process owns:
-
-- the OS process entry point;
-- JVM creation and destruction;
-- native transport runtime initialization and shutdown;
-- native event-loop ownership;
-- native socket/connection resources;
-- final process exit status.
-
-Java/Tomcat owns:
+Tomcat/Java owns:
 
 - Catalina and Server lifecycle semantics;
-- Connector/Protocol/Coyote lifecycle semantics unless a later verified integration point delegates selected transport work to native code;
-- HTTP/Servlet processing;
-- application lifecycle and class loading;
+- Connector/Protocol/Coyote lifecycle unless a later verified transport integration delegates selected operations to native code;
+- HTTP protocol processing;
+- Catalina/Servlet application lifecycle;
 - Servlet, Filter, Listener and Async semantics.
 
-Ownership does not imply that all native work is performed by the C `main()` thread. Native event-loop and worker threads may be created after initialization subject to the JVM/JNI thread-attachment contract.
+A native worker/event-loop thread may call Java through JNI only under the JVM thread-attachment rules.
 
-## 4. JVM creation
+## 5. Current JVM creation path
 
-The C entry point uses the JNI Invocation API to create the JVM. The implementation explicitly constructs and verifies the JVM initialization arguments instead of assuming that the JVM is already running.
+The native entry point dynamically loads the JVM library under `JAVA_HOME/lib/server/libjvm.so`, constructs the configured JVM options/class path, and invokes `JNI_CreateJavaVM()`.
 
-The implementation records/configures:
+The bootstrap class is:
 
-- JVM library discovery through `JAVA_HOME/lib/server/libjvm.so`;
-- JVM option construction;
-- Java class path supplied through `NATIVETOMCAT_JAVA_CP`;
-- Java bootstrap class `org.apache.tomcat.nativebootstrap.NativeTomcatBootstrap`;
-- the result of `JNI_CreateJavaVM()` and subsequent Java bootstrap failure through the native lifecycle status.
+`org.apache.tomcat.nativebootstrap.NativeTomcatBootstrap`
 
-No JDK 25 requirement is introduced by this implementation. The project compatibility floor remains JDK 17+ unless a concrete feature establishes a higher minimum.
+The current configuration uses `NATIVETOMCAT_JAVA_CP` for the Java class path and the bootstrap requires `NATIVETOMCAT_CATALINA_HOME`, with optional `NATIVETOMCAT_CATALINA_BASE`.
 
-## 5. Java bootstrap boundary
+These are implementation facts. Successful embedded Tomcat execution still requires a complete pinned Tomcat runtime/class path on a suitable host.
 
-`NativeTomcatBootstrap` is now a Java-side lifecycle bridge. It requires `NATIVETOMCAT_CATALINA_HOME`, optionally accepts `NATIVETOMCAT_CATALINA_BASE`, sets the corresponding `catalina.home` and `catalina.base` system properties, then invokes Tomcat's `Bootstrap.init()` followed by `Bootstrap.start()`.
+## 6. Java bootstrap boundary
 
-Shutdown invokes the corresponding Tomcat `Bootstrap.stop()` path.
+`NativeTomcatBootstrap` delegates to Tomcat's `org.apache.catalina.startup.Bootstrap` and invokes the normal `init()` / `start()` path. Shutdown invokes the corresponding stop path.
 
-This preserves the Tomcat bootstrap/classloader/lifecycle implementation rather than introducing a parallel NativeTomcat implementation of Catalina or Server lifecycle.
+This is a reuse of Tomcat lifecycle code, not a parallel Catalina implementation.
 
-The source-level integration has been verified against the pinned Tomcat 11.0.25 source. Actual startup still requires execution on a build host with the pinned submodule, generated Tomcat runtime, compatible JDK, and a complete Java class path.
+The source-level delegation has been checked against the pinned Tomcat baseline. That source verification does not by itself prove that the complete embedded runtime starts successfully in the current local environment.
 
-## 6. Threading and JNI rules
+## 7. JNI thread rules
 
-A native thread that calls Java through JNI must have an appropriate `JNIEnv*`. A `JNIEnv*` is thread-local and must not be shared between threads.
+`JNIEnv*` is thread-specific. Native code must establish a valid environment for the calling thread before making JNI calls and must detach a thread that it attached before that thread terminates.
 
-Persistent Java objects referenced by native code must use JNI global references. Local references must not escape the native call in which they were created.
+Persistent Java references retained by native code must be JNI global references. Local references must not escape their JNI call scope.
 
-Native code must check for pending Java exceptions after JNI calls that can throw and must map failure into the lifecycle protocol rather than continuing with an invalid Java state.
+Every JNI operation that can raise a Java exception must be checked. A pending exception is a failure state unless the exact API contract explicitly handles it.
 
-The current JVM bridge keeps the persistent bootstrap class as a JNI global reference and performs Java bootstrap/shutdown calls on the JVM-owning native thread.
+The current JVM bridge retains the bootstrap class as a global reference and attaches native event-loop threads when they dispatch Java events.
 
-## 7. Shutdown ordering
+## 8. Shutdown ownership
 
-The shutdown protocol must prevent use-after-free across the native and Java runtimes.
-
-The current JVM smoke-lifecycle ordering is:
+The current JVM smoke lifecycle is:
 
 ```text
-C main()
+C main
   -> create JVM
   -> Java Bootstrap.init/start
   -> wait for native stop request
   -> Java Bootstrap.stop
-  -> release bootstrap global reference
+  -> release persistent bootstrap reference
   -> DestroyJavaVM
-  -> C process exit
+  -> C exit
 ```
 
-The final ordering for integrated native transport remains an implementation question. Once native transport is connected, shutdown must additionally coordinate event dispatch, accepting sockets, connection ownership and Tomcat Connector shutdown. It must not be guessed in advance.
+Native transport integration adds another dependency:
 
-`nt_runtime_destroy()` must not execute concurrently with `nt_runtime_run()` under the current native runtime contract.
+```text
+stop accepting
+  -> stop native event dispatch
+  -> drain/terminate Java transport work
+  -> release wrapper/native references
+  -> destroy native connections
+  -> stop Tomcat
+  -> destroy JVM
+```
 
-## 8. Current implementation status
+The latter is a **required design direction, not an implemented final protocol**. Its exact ordering must be derived from the actual Java wrapper lifetime and Tomcat connector shutdown path before being frozen.
 
-Implemented at source level:
+The current native runtime also requires `nt_runtime_run()` to return before `nt_runtime_destroy()`.
+
+## 9. Current implementation status
+
+### Implemented / source-level
 
 - native C `main()`;
-- JNI Invocation API JVM creation;
-- Java bootstrap class lookup and invocation;
-- Java-side delegation to Tomcat `Bootstrap.init()` / `start()` / `stop()`;
-- JNI global reference management for the bootstrap class;
-- native wait/stop coordination around the embedded JVM;
-- Ant gates for verifying the pinned Tomcat commit, compiling Tomcat, building a working Tomcat runtime, and compiling NativeTomcat Java against the pinned Tomcat classes.
+- JVM Invocation API loading/creation;
+- Java bootstrap class lookup/invocation;
+- delegation to Tomcat `Bootstrap.init()` / `start()` / `stop()`;
+- bootstrap global-reference management;
+- native wait/stop coordination;
+- Ant gates for pinned-source/build verification.
 
-Not yet claimed as runtime-verified:
+### Compiled/tested
 
-- successful execution of the complete Ant build on a real build host;
-- successful embedded Tomcat startup;
-- successful connector bind/listen;
-- HTTP request/response through the embedded server;
-- leak/race-free end-to-end shutdown under the real runtime;
-- replacement of the standard Tomcat Connector;
-- native `SocketWrapperBase` implementation;
-- JNI request/response transport bridge;
-- Servlet dispatch through the native runtime.
+The repository's current NativeTomcat Java surface and native smoke tests have executable verification paths. Those tests do not constitute embedded Tomcat HTTP integration.
 
-## 9. Required validation before transport integration
+### Not runtime-verified in the current environment
 
-Before the native transport is connected to Tomcat, the project must demonstrate, on a real build host:
+- complete pinned Tomcat Ant build;
+- complete embedded Tomcat startup;
+- connector bind/listen through the embedded lifecycle;
+- HTTP request/response through the NativeTomcat transport;
+- race-free shutdown with queued native-to-Java transport work;
+- replacement of the normal Tomcat Connector.
 
-1. C `main()` can create the intended JVM.
-2. The selected JDK and JVM library are actually usable.
-3. The Java bootstrap class is loadable from the repository's built Java artifacts.
-4. Tomcat 11.0.25 Catalina can initialize through the embedded path.
-5. Tomcat can reach its normal initialized/running lifecycle state.
-6. Shutdown can complete without leaked JVM/native ownership or thread races.
-7. The complete path is orchestrated by the repository's Ant build/test system.
-8. A local HTTP smoke test can confirm that the configured Tomcat connector actually accepts a request.
+## 10. Preconditions for transport integration
 
-Only after these checks pass should the project implement the C/Java socket transport insertion point.
+Before treating native transport as part of the running Tomcat connector, the project must verify on a suitable build host:
 
-## 10. Evidence categories
+1. exact pinned Tomcat source is available;
+2. the required Tomcat runtime is built;
+3. the embedded bootstrap starts the configured Tomcat lifecycle;
+4. the configured connector reaches its normal running state;
+5. shutdown completes cleanly;
+6. native connection ownership and Java wrapper ownership have an explicit lifetime protocol;
+7. the native event path reaches the real Tomcat `processSocket()` / `SocketProcessor` path;
+8. an HTTP smoke test passes through that real path.
 
-Statements about Tomcat methods and lifecycle are upstream source facts and must be checked against the pinned Tomcat 11.0.25 source.
+Only then should end-to-end Servlet behavior be evaluated.
 
-Statements about C ownership, JNI boundaries and lifecycle ordering in this document are NativeTomcat design decisions unless explicitly identified as upstream facts.
+## 11. Non-claims
 
-Source-level integration is not equivalent to runtime success. Performance, compatibility, absence of races and end-to-end shutdown correctness require executed tests or benchmarks; they are not established by this document.
+This document does not establish:
+
+- successful embedded Tomcat runtime execution merely from source-level delegation;
+- native transport replacement of the Tomcat Connector;
+- Servlet/TCK compatibility;
+- leak/race freedom under the final transport path;
+- benchmark performance;
+- a final shutdown order for integrated native transport.
