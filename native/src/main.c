@@ -15,10 +15,6 @@ static void native_connection_handler(nt_runtime_t *runtime, nt_connection_t *co
 	(void)runtime;
 	if (nt_jvm_dispatch_event(jvm, (uint64_t)(uintptr_t)connection, events) != 0) {
 		nt_connection_close(connection);
-		return;
-	}
-	if ((events & (NT_RUNTIME_EVENT_PEER_READ_CLOSED | NT_RUNTIME_EVENT_ERROR)) != 0) {
-		nt_connection_close(connection);
 	}
 }
 
