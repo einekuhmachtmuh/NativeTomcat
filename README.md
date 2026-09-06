@@ -4,7 +4,7 @@ NativeTomcat is an experimental Servlet 6.1-compatible container architecture th
 
 ## Status
 
-The repository is bootstrapped from an empty repository. The current implementation is an initial native runtime scaffold plus a minimal Java bootstrap hook; Servlet 6.1 compatibility and performance claims are not yet established.
+The repository contains an initial native runtime scaffold, a native C process entry point, an embedded-JVM lifecycle bridge, and a minimal Java-side Tomcat bootstrap. The native event loop and connection primitives are implemented, but the native transport is not yet integrated with Tomcat's `SocketWrapperBase`/HTTP processing path. Servlet 6.1 compatibility and performance claims are therefore not yet established.
 
 ## Version baseline
 
@@ -17,7 +17,9 @@ JDK 25 is not a project-wide requirement. Tomcat 11.0.25's general runtime/sourc
 
 ## Build
 
-Ant is the intended top-level build/test orchestrator. The build is not considered validated until the required JDK, Ant, C compiler/linker, JNI headers, TLS libraries and test dependencies have been checked on the target host.
+Ant is the intended top-level build/test orchestrator. The top-level Java compile target builds the pinned Tomcat source first and compiles NativeTomcat Java against the resulting Tomcat classes. The Tomcat submodule is expected to be initialized and is verified against the pinned commit before the upstream Ant build is invoked.
+
+The build is not considered validated until the required JDK, Ant, C compiler/linker, JNI headers, TLS libraries and test dependencies have been checked on the target host.
 
 ## Design rule
 
@@ -25,4 +27,6 @@ Native code is introduced only where profiling and source-level analysis show a 
 
 ## Process entry point
 
-The target NativeTomcat architecture uses a native C `main()` as the operating-system process entry point. The C process is responsible for creating the embedded JVM through the JNI Invocation API and coordinating native/JVM lifecycle. The current repository has not yet implemented that entry point; the existing Java bootstrap hook is only a placeholder for the later embedded-JVM integration.
+The NativeTomcat architecture uses a native C `main()` as the operating-system process entry point. The C process dynamically loads the JVM through the JNI Invocation API, creates the embedded JVM, invokes `org.apache.tomcat.nativebootstrap.NativeTomcatBootstrap`, and coordinates JVM shutdown. The Java bootstrap sets `catalina.home`/`catalina.base` from the NativeTomcat environment and initializes and starts the pinned Tomcat Catalina lifecycle.
+
+This embedded-JVM/bootstrap path is implemented. The remaining integration gap is the native transport-to-Tomcat connection path; the current native event loop does not yet replace Tomcat's socket transport or establish Servlet-visible compatibility.
