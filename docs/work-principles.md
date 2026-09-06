@@ -58,7 +58,18 @@ source verification 後重新調整：
 
 若只有 docs 或步驟需要改，也要說明 source 為何支持該修正。
 
-## 3. 不得跳過的 gate
+## 3. 實作簡潔原則
+
+在不犧牲 correctness、ownership、lifetime、可測試性與外部 contract 的前提下，實作應採取**最小且直接的正確方案**：
+
+- 優先一個明確 owner、一條主要資料/事件路徑、一個狀態轉換來源；避免重複的 state、queue、callback 或 abstraction。
+- 不為尚未需要的功能建立通用框架；先實作當前 gate 所要求的最小 surface。
+- 不以「未來可能需要」為理由提前加入複雜同步、快取、分層或最佳化；確有 contract 或測量證據時才引入。
+- 優先消除不必要的轉發與狀態複製；每增加一層 abstraction，都必須能指出它保護的 contract 或解決的 ownership/lifetime 問題。
+- 簡潔不能透過刪除必要的錯誤處理、生命週期檢查、同步或驗證來取得。
+- 若簡潔方案與 Tomcat/Servlet/NGINX 已核實的 contract 衝突，contract 優先，不為追求短小而改變語意。
+
+## 4. 不得跳過的 gate
 
 提出或執行下一步前，檢查：
 
@@ -73,7 +84,7 @@ source verification 後重新調整：
 
 若外部環境造成 blocking，可以先做不依賴該 gate 的獨立工作，但不得把 blocked gate 宣稱完成，也不得用 shell test 冒充 exact upstream integration。
 
-## 4. 必須維持的語意邊界
+## 5. 必須維持的語意邊界
 
 - 不得以 NativeTomcat shell、docs 或 roadmap 作為 Tomcat semantics 的權威來源。
 - 不得把 NGINX implementation detail 提升為 Servlet 或 Tomcat requirement。
@@ -85,7 +96,7 @@ source verification 後重新調整：
 - 不得把未取得、未核驗的 pinned source 宣稱為 migration 完成。
 - 不得因 compile 或 surface test PASS 就推定 Tomcat runtime semantics 正確。
 
-## 5. 驗證分層
+## 6. 驗證分層
 
 每項工作明確標示已達到的層級：
 
@@ -101,7 +112,7 @@ source verification 後重新調整：
 
 例如：surface test PASS ≠ Tomcat integration PASS；compile PASS ≠ runtime semantics correct；native event test PASS ≠ Servlet readiness correct；benchmark harness 可執行 ≠ benchmark result 已取得。
 
-## 6. 工作記錄
+## 7. 工作記錄
 
 每完成重要步驟，記錄：
 
