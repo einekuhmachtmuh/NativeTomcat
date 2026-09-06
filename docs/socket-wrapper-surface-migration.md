@@ -1,25 +1,18 @@
-# SocketWrapperBase minimum concrete surface
+# SocketWrapperBase surface and migration status
 
-## Verification status
+## 1. Purpose
 
-This document marks the current implementation as a **surface proof**, not as a claim that NativeTomcat has replaced Tomcat 11.0.25's transport implementation.
+This document records the current repository-owned `SocketWrapperBase` compatibility surface and the gate for replacing it with the exact Tomcat 11.0.25 implementation.
 
-The reference is the pinned Tomcat 11.0.25 source commit:
+Reference:
 
-`cbe6e15ee81e2fc6232954292a80cca5d1e84009`
+`Tomcat 11.0.25 / cbe6e15ee81e2fc6232954292a80cca5d1e84009`
 
-Primary source files checked before creating this surface:
+This document must never be read as proof that the compatibility shell has Tomcat transport semantics.
 
-- `org/apache/tomcat/util/net/SocketWrapperBase.java`
-- `org/apache/tomcat/util/net/NioEndpoint.java`
-- `org/apache/tomcat/util/net/NioEndpoint.NioSocketWrapper`
-- `org/apache/tomcat/util/net/SocketProcessorBase.java`
+## 2. Current repository surface
 
-The Tomcat API documentation also confirms that `NioEndpoint.NioSocketWrapper` directly subclasses `SocketWrapperBase<NioChannel>` and that `SocketProcessorBase.run()` is the processor execution boundary.
-
-## Surface established in this repository
-
-The first repository-owned surface is:
+The current type relationship is:
 
 ```text
 SocketWrapperBase<E>
@@ -31,93 +24,139 @@ SocketWrapperBase<E>
             +-- NativeSocketProcessor
 ```
 
-The following surface categories are deliberately represented:
+The surface contains representative categories for identity, endpoint association, locking, processor association, close state, read/write APIs, readiness, buffer handling, timeout, keep-alive, metadata, errors, interest registration and deferred advanced I/O.
 
-| Category | Current surface | Status |
-|---|---|---|
-| socket identity | `getSocket()` / opaque native handle | present |
-| endpoint association | `getEndpoint()` | present |
-| per-connection lock | `getLock()` | present |
-| processor association | `getCurrentProcessor()` / `setCurrentProcessor()` / `takeCurrentProcessor()` | present |
-| close state | `close()` / `isClosed()` / `doClose()` | present |
-| read | byte[] + `ByteBuffer` overloads | explicit deferred implementation |
-| read readiness | `isReadyForRead()` | present as transport-surface proof |
-| application read buffer | `setAppReadBufHandler()` | surface present |
-| write | byte[] + `ByteBuffer` overloads | explicit deferred implementation |
-| write readiness | `canWrite()` / `isReadyForWrite()` | surface present |
-| write interest | `registerWriteInterest()` | present |
-| read interest | `registerReadInterest()` | present |
-| flush | `flush()` / `flushNonBlocking()` | surface present |
-| timeout | read/write timeout getters/setters | present |
-| keep-alive | setter/decrement operation | present |
-| addresses | local/remote getters + population hooks | present |
-| negotiated protocol/SNI | getters/setters | present |
-| error state | `getError()` / `setError()` / `checkError()` | present |
-| sendfile | create/process surface | explicitly deferred |
-| TLS | client auth / SSL support surface | explicitly deferred |
-| vectored async I/O | operation/enums/callback surface | explicitly deferred |
-| push-back | `unRead()` | explicitly deferred |
-| SocketProcessor dispatch | `processSocket()` | connected to endpoint surface |
+The surface test proves only the properties it actually exercises, especially per-wrapper serialization. It does not prove behavioral equivalence with Tomcat 11.0.25.
 
-## SocketProcessorBase verification
+## 3. Current implementation status
 
-Tomcat 11.0.25's `SocketProcessorBase` has two critical properties that are preserved here:
+### Present as compatibility surface
 
-1. it owns a `SocketWrapperBase<S>` and a `SocketEvent`;
-2. `run()` acquires the wrapper's lock before invoking `doRun()` and releases it afterwards.
+- opaque native socket identity;
+- endpoint association;
+- per-connection lock;
+- current processor association;
+- close/error state surface;
+- byte-array and `ByteBuffer` read/write method shapes;
+- read/write readiness method shapes;
+- read/write interest method shapes;
+- flush and timeout method shapes;
+- application read-buffer handler surface;
+- protocol/SNI/address metadata surface.
 
-`NativeSocketProcessor` exists only to prove this serialization boundary. The current test submits multiple processors for one wrapper and requires `maxActive == 1`.
+### Explicitly incomplete
 
-This is intentionally different from the native event loop: native readiness detection may be concurrent with other native work, but Java protocol processing for one logical connection remains serialized.
+`NativeSocketWrapper` still contains deferred or placeholder behavior for the operations that actually touch the native transport, including read, write and final native close/lifetime handling. Interest registration is not yet a complete cross-thread event-loop protocol.
 
-## NioEndpoint / NioSocketWrapper comparison
+Advanced Tomcat behavior remains deferred where applicable:
 
-The Tomcat 11.0.25 NIO implementation establishes the following reference model:
+- sendfile;
+- TLS/SSL support;
+- vectored asynchronous I/O;
+- push-back/unread;
+- protocol upgrade.
+
+## 4. Why the shell is insufficient
+
+The pinned `SocketWrapperBase` contains materially more than a descriptor wrapper. Its behavior participates in:
+
+- endpoint/executor dispatch;
+- connection locking;
+- application and socket buffers;
+- non-blocking read/write state;
+- async operation state;
+- processor association;
+- timeout and keep-alive state;
+- error propagation;
+- close/recycle lifecycle;
+- Servlet connection metadata;
+- advanced transport paths.
+
+Consequently matching method names is not enough. The exact method bodies and supporting classes must be migrated or explicitly adapted after source-level comparison.
+
+## 5. Exact-source gate
+
+The pinned upstream `SocketWrapperBase.java` has been source-inspected and its blob identity recorded during the project audit. The repository copy is **still a compatibility shell**, not the exact upstream implementation.
+
+Therefore the migration gate remains open.
+
+Before replacing the shell, the project must:
+
+1. obtain/materialize the exact pinned source in the repository;
+2. verify its package/path/content;
+3. resolve every required supporting Tomcat class recursively;
+4. update both `build.xml` and `build_test.xml`;
+5. compile the migrated source;
+6. preserve or update focused tests to cover the new semantics;
+7. compare the resulting behavior with the pinned source before advancing to `NativeSocketWrapper` transport integration.
+
+If the exact source cannot be materialized, do not hand-recreate it.
+
+## 6. NIO reference path
+
+The pinned Tomcat NIO architecture is:
 
 ```text
 NioEndpoint
-  -> NioSocketWrapper extends SocketWrapperBase<NioChannel>
-  -> Poller interest/ready handling
-  -> AbstractEndpoint.processSocket(...)
-  -> SocketProcessorBase
+    -> NioSocketWrapper extends SocketWrapperBase<NioChannel>
+    -> Poller registration/readiness
+    -> AbstractEndpoint.processSocket()
+    -> SocketProcessorBase
 ```
 
-The NativeTomcat surface currently mirrors the abstraction boundary, but it does **not** claim to implement NioEndpoint's selector/poller, sendfile, TLS, or NIO2 behavior.
+NativeTomcat is replacing the readiness/transport implementation, not the Tomcat protocol semantics. The adapter therefore has to reproduce the `SocketWrapperBase` contract required by the normal Tomcat processing path.
 
-In particular, the current `NativeSocketWrapper` does not turn native epoll readiness into Servlet readiness. That distinction remains mandatory.
+## 7. Event and readiness boundary
 
-## NGINX cross-check
+A native epoll event is not itself a `SocketEvent`, a processor invocation, or a Servlet readiness notification.
 
-The native event design was also checked against NGINX's event architecture. `ngx_event_accept.c` accepts connections and initializes connection/event state; `ngx_event.c` separates event polling from event handling and explicitly manages read/write event registration. NGINX's event flags distinguish level, one-shot and clear-event semantics.
-
-This supports the NativeTomcat rule that:
+The final mapping must preserve:
 
 ```text
-native readiness
-    != Java SocketProcessor execution
-    != Servlet isReady()
+kernel readiness
+    -> native event handling
+    -> Tomcat SocketEvent / processSocket
+    -> SocketProcessor
+    -> protocol processing
+    -> Servlet readiness semantics
 ```
 
-The native runtime therefore remains responsible for readiness and re-arm policy, while the Java layer owns protocol/Servlet semantics.
+This is also consistent with the NGINX cross-check, where event polling and handler dispatch remain distinct concerns.
 
-## What is deliberately NOT claimed yet
+## 8. Serialization requirement
 
-The following are not complete:
+The current `SocketProcessorBase` surface preserves the important Tomcat property that processing for one wrapper is serialized by the wrapper lock.
 
-- exact upstream `SocketWrapperBase` implementation body;
-- exact `NioSocketWrapper` implementation body;
-- exact `NioEndpoint` implementation body;
-- actual native handle read/write JNI methods;
-- actual `AbstractEndpoint.processSocket()` implementation;
-- actual Tomcat `SocketProcessor` reuse/pooling;
-- HTTP/1.1 `Http11Processor` entry;
-- TLS/OpenSSL;
-- sendfile;
-- vectored async I/O;
-- protocol upgrade.
+The existing surface test demonstrates `maxActive == 1` for concurrent processor submissions on one wrapper. This is a **unit/surface verification**, not an integration proof.
 
-These remain separate gates so that a successful surface test cannot be mistaken for a complete Tomcat transport integration.
+When the real upstream `SocketProcessorBase` and `SocketWrapperBase` are introduced, the test must be rerun against the real implementation rather than assumed to remain valid.
 
-## Next implementation gate
+## 9. Integration order
 
-The next step is to replace the compatibility shell incrementally with the corresponding Tomcat 11.0.25 source while preserving the passing surface test. Each replacement must be checked against the pinned source before the next class is introduced.
+The migration and integration sequence is:
+
+```text
+exact SocketWrapperBase
+    -> required supporting classes
+    -> NativeSocketWrapper real I/O
+    -> native handle/wrapper lifetime
+    -> event -> SocketEvent mapping
+    -> real AbstractEndpoint.processSocket()
+    -> real SocketProcessorBase
+    -> ProtocolHandler
+    -> Http11Processor
+    -> CoyoteAdapter / Catalina / Servlet
+```
+
+No later stage is considered complete merely because an earlier type compiles.
+
+## 10. Explicit non-claims
+
+This document does not claim:
+
+- exact upstream `SocketWrapperBase` migration is complete;
+- `NativeSocketWrapper` implements Tomcat NIO behavior;
+- native epoll readiness is Servlet readiness;
+- native I/O is zero-copy;
+- the current lifetime protocol is race-free under full Java integration;
+- HTTP/1.1 processing already reaches the native wrapper.
