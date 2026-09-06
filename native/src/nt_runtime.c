@@ -1,5 +1,7 @@
 #include "nt_runtime.h"
 
+#include "nt_connection.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,6 +21,11 @@ struct nt_runtime {
 	int wake_fd;
 	int max_events;
 	atomic_bool stop_requested;
+	nt_connection_t **connections;
+	size_t connection_count;
+	size_t connection_capacity;
+	int listener_token;
+	int wake_token;
 };
 
 static int nt_set_nonblocking(int fd) {
@@ -58,6 +65,80 @@ static int nt_create_listener(const nt_runtime_config_t *config) {
 	}
 
 	return fd;
+}
+
+static int nt_runtime_add_connection(nt_runtime_t *runtime, nt_connection_t *connection) {
+	if (runtime->connection_count == runtime->connection_capacity) {
+		size_t new_capacity = runtime->connection_capacity == 0 ? 64 : runtime->connection_capacity * 2;
+		if (new_capacity < runtime->connection_capacity ||
+				new_capacity > SIZE_MAX / sizeof(*runtime->connections)) {
+			errno = EOVERFLOW;
+			return -1;
+		}
+
+		nt_connection_t **connections = realloc(
+				runtime->connections, new_capacity * sizeof(*runtime->connections));
+		if (connections == NULL) {
+			return -1;
+		}
+		runtime->connections = connections;
+		runtime->connection_capacity = new_capacity;
+	}
+
+	runtime->connections[runtime->connection_count++] = connection;
+	return 0;
+}
+
+static void nt_runtime_close_connections(nt_runtime_t *runtime) {
+	for (size_t i = 0; i < runtime->connection_count; ++i) {
+		nt_connection_close(runtime->connections[i]);
+	}
+}
+
+static void nt_runtime_destroy_connections(nt_runtime_t *runtime) {
+	for (size_t i = 0; i < runtime->connection_count; ++i) {
+		nt_connection_destroy(runtime->connections[i]);
+	}
+	free(runtime->connections);
+	runtime->connections = NULL;
+	runtime->connection_count = 0;
+	runtime->connection_capacity = 0;
+}
+
+static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
+	for (;;) {
+		int client = accept4(runtime->listener_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+		if (client == -1) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+				if (errno == EINTR) {
+					continue;
+				}
+				break;
+			}
+			break;
+		}
+
+		nt_connection_t *connection = NULL;
+		if (nt_connection_create(&connection, client) == -1) {
+			close(client);
+			continue;
+		}
+
+		struct epoll_event event;
+		memset(&event, 0, sizeof(event));
+		event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
+		event.data.ptr = connection;
+		if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, client, &event) == -1) {
+			nt_connection_destroy(connection);
+			continue;
+		}
+
+		if (nt_runtime_add_connection(runtime, connection) == -1) {
+			epoll_ctl(runtime->epoll_fd, EPOLL_CTL_DEL, client, NULL);
+			nt_connection_destroy(connection);
+			continue;
+		}
+	}
 }
 
 int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
@@ -101,7 +182,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	struct epoll_event event;
 	memset(&event, 0, sizeof(event));
 	event.events = EPOLLIN;
-	event.data.fd = value->listener_fd;
+	event.data.ptr = &value->listener_token;
 	if (epoll_ctl(value->epoll_fd, EPOLL_CTL_ADD, value->listener_fd, &event) == -1) {
 		close(value->wake_fd);
 		close(value->epoll_fd);
@@ -110,7 +191,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		return -1;
 	}
 
-	event.data.fd = value->wake_fd;
+	event.data.ptr = &value->wake_token;
 	if (epoll_ctl(value->epoll_fd, EPOLL_CTL_ADD, value->wake_fd, &event) == -1) {
 		close(value->wake_fd);
 		close(value->epoll_fd);
@@ -145,34 +226,32 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 		}
 
 		for (int i = 0; i < count; ++i) {
-			if (events[i].data.fd == runtime->wake_fd) {
+			if (events[i].data.ptr == &runtime->wake_token) {
 				uint64_t value;
 				while (read(runtime->wake_fd, &value, sizeof(value)) == sizeof(value)) {
 				}
 				continue;
 			}
 
-			if (events[i].data.fd != runtime->listener_fd) {
+			if (events[i].data.ptr == &runtime->listener_token) {
+				nt_runtime_accept_connections(runtime);
 				continue;
 			}
 
-			for (;;) {
-				int client = accept4(runtime->listener_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
-				if (client == -1) {
-					if (errno == EAGAIN || errno == EWOULDBLOCK) {
-						break;
-					}
-					if (errno == EINTR) {
-						continue;
-					}
-					break;
-				}
-				close(client);
+			nt_connection_t *connection = events[i].data.ptr;
+			if (nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
+				continue;
+			}
+
+			if ((events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+				nt_connection_close(connection);
+				continue;
 			}
 		}
 	}
 
 	free(events);
+	nt_runtime_close_connections(runtime);
 	return 0;
 }
 
@@ -191,6 +270,8 @@ void nt_runtime_destroy(nt_runtime_t *runtime) {
 	if (runtime == NULL) {
 		return;
 	}
+
+	nt_runtime_destroy_connections(runtime);
 	if (runtime->wake_fd != -1) {
 		close(runtime->wake_fd);
 	}
