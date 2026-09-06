@@ -21,6 +21,8 @@ struct nt_runtime {
 	int epoll_fd;
 	int wake_fd;
 	int max_events;
+	nt_runtime_connection_handler_t connection_handler;
+	void *connection_handler_data;
 	atomic_bool stop_requested;
 	nt_connection_t **connections;
 	size_t connection_count;
@@ -157,6 +159,8 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->epoll_fd = -1;
 	value->wake_fd = -1;
 	value->max_events = config->max_events;
+	value->connection_handler = config->connection_handler;
+	value->connection_handler_data = config->connection_handler_data;
 	atomic_init(&value->stop_requested, false);
 
 	value->listener_fd = nt_create_listener(config);
@@ -203,6 +207,21 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 
 	*runtime = value;
 	return 0;
+}
+
+int nt_runtime_get_port(const nt_runtime_t *runtime) {
+	if (runtime == NULL || runtime->listener_fd == -1) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_in address;
+	socklen_t length = sizeof(address);
+	if (getsockname(runtime->listener_fd, (struct sockaddr *) &address, &length) == -1) {
+		return -1;
+	}
+
+	return (int) ntohs(address.sin_port);
 }
 
 int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write) {
@@ -264,13 +283,24 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 				continue;
 			}
 
-			if ((events[i].events & EPOLLERR) != 0) {
-				nt_connection_close(connection);
-				continue;
+			unsigned connection_events = 0;
+			if ((events[i].events & EPOLLIN) != 0) {
+				connection_events |= NT_RUNTIME_EVENT_READABLE;
 			}
-
+			if ((events[i].events & EPOLLOUT) != 0) {
+				connection_events |= NT_RUNTIME_EVENT_WRITABLE;
+			}
 			if ((events[i].events & (EPOLLRDHUP | EPOLLHUP)) != 0) {
 				nt_connection_mark_peer_read_closed(connection);
+				connection_events |= NT_RUNTIME_EVENT_PEER_READ_CLOSED;
+			}
+			if ((events[i].events & EPOLLERR) != 0) {
+				connection_events |= NT_RUNTIME_EVENT_ERROR;
+			}
+
+			if (runtime->connection_handler != NULL && connection_events != 0) {
+				runtime->connection_handler(runtime, connection, connection_events,
+						runtime->connection_handler_data);
 			}
 		}
 	}

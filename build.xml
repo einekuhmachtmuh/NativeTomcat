@@ -93,6 +93,64 @@
 	<target name="native-runtime-prepare" depends="tomcat-deploy,native-java-compile" description="Build the pinned Tomcat runtime and NativeTomcat Java bridge">
 	</target>
 
+	<target name="native-test" depends="init" description="Compile and run the native event-runtime regression test">
+		<mkdir dir="${native.build.dir}" />
+		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
+			<arg value="-std=gnu11" />
+			<arg value="-D_GNU_SOURCE" />
+			<arg value="-Wall" />
+			<arg value="-Wextra" />
+			<arg value="-Wpedantic" />
+			<arg value="-I${basedir}/native/include" />
+			<arg value="-pthread" />
+			<arg value="-o" />
+			<arg value="${native.build.dir}/nt_runtime_test" />
+			<arg value="${basedir}/native/tests/nt_runtime_test.c" />
+			<arg value="${basedir}/native/src/nt_runtime.c" />
+			<arg value="${basedir}/native/src/nt_connection.c" />
+		</exec>
+		<exec executable="${native.build.dir}/nt_runtime_test" failifexecutionfails="true" failonerror="true" />
+	</target>
+
+	<target name="native-event-dispatcher-test" depends="init" description="Verify per-connection event serialization and coalescing">
+		<mkdir dir="${basedir}/output/native-java/test-classes" />
+		<javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8">
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java" />
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherUnitTest.java" />
+		</javac>
+		<java classname="org.apache.tomcat.nativebootstrap.NativeEventDispatcherUnitTest" fork="true" failonerror="true">
+			<classpath><pathelement location="${basedir}/output/native-java/test-classes" /></classpath>
+		</java>
+	</target>
+
+	<target name="native-jvm-dispatch-test" depends="init" description="Verify JNI event dispatch attaches native threads and hands work to a Java Executor">
+		<mkdir dir="${native.build.dir}" />
+		<mkdir dir="${basedir}/output/native-java/test-classes" />
+		<javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8">
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java" />
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherTest.java" />
+		</javac>
+		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
+			<arg value="-std=gnu11" />
+			<arg value="-D_GNU_SOURCE" />
+			<arg value="-Wall" />
+			<arg value="-Wextra" />
+			<arg value="-Wpedantic" />
+			<arg value="-I${basedir}/native/include" />
+			<arg value="-I${java.home}/include" />
+			<arg value="-I${java.home}/include/linux" />
+			<arg value="-pthread" />
+			<arg value="-o" />
+			<arg value="${native.build.dir}/nt_jvm_dispatch_test" />
+			<arg value="${basedir}/native/tests/nt_jvm_dispatch_test.c" />
+			<arg value="${basedir}/native/src/nt_jvm.c" />
+			<arg value="-ldl" />
+		</exec>
+		<exec executable="${native.build.dir}/nt_jvm_dispatch_test" failifexecutionfails="true" failonerror="true">
+			<env key="NATIVETOMCAT_JAVA_TEST_CP" path="${basedir}/output/native-java/test-classes" />
+		</exec>
+	</target>
+
 	<target name="native-compile" depends="init" description="Compile the existing Linux native sources into the NativeTomcat executable">
 		<mkdir dir="${native.build.dir}" />
 		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">

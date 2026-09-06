@@ -48,3 +48,37 @@ The next native layer should define the connection input/output buffer contract 
 3. when `EPOLLOUT` is armed/disarmed;
 4. how a Java consumer requests rearming without racing the event-loop owner;
 5. how close/error events are propagated exactly once.
+
+## 10. Connection event dispatch boundary
+
+The runtime now exposes a native connection-event callback. The callback receives a bitmask containing:
+
+- `NT_RUNTIME_EVENT_READABLE` for `EPOLLIN`;
+- `NT_RUNTIME_EVENT_WRITABLE` for `EPOLLOUT`;
+- `NT_RUNTIME_EVENT_PEER_READ_CLOSED` for `EPOLLRDHUP` or `EPOLLHUP`;
+- `NT_RUNTIME_EVENT_ERROR` for `EPOLLERR`.
+
+The callback executes on the native event-loop thread. It owns the current event-processing step and may perform non-blocking connection I/O. Because accepted sockets use `EPOLLONESHOT`, the callback (or the future dispatch owner after it has completed its work) must explicitly call `nt_runtime_rearm_connection()` exactly once when the connection remains active. This callback is therefore an event-ownership boundary, not a Servlet callback.
+
+This is intentionally not a Java callback yet. It establishes the missing native event-dispatch boundary without conflating kernel readiness with Servlet readiness or bypassing Tomcat's processor/executor model.
+
+## 11. Native event-loop to Tomcat Executor hand-off
+
+The native event-loop callback now has a JNI hand-off path. The ownership split is:
+
+```text
+native epoll thread
+    -> JNI attach
+    -> NativeTomcatBootstrap.dispatchNativeEvent()
+    -> NativeEventDispatcher
+    -> Tomcat connector ProtocolHandler.getExecutor()
+    -> Executor.execute(Runnable)
+```
+
+The native event-loop thread does not execute the Java processing task. It submits the event to the Tomcat-owned Executor and then retains ownership of the native epoll registration, including `EPOLLONESHOT` re-arming.
+
+`NativeEventDispatcher` coalesces events for the same native connection handle and guarantees that only one task for that handle is executing at a time. This mirrors the important concurrency property of Tomcat's `SocketProcessorBase.run()`, which serializes processing for a `SocketWrapperBase` by acquiring its connection lock.
+
+The current task body deliberately stops at the transport-dispatch boundary. It does not pretend that a native handle is already a `SocketWrapperBase`, and it does not invoke `Http11Processor` directly. The next integration step must construct the real `SocketWrapperBase`-compatible transport object and use Tomcat's existing `processSocket` / `SocketProcessor` path.
+
+For now the native runtime re-arms read interest only. Write interest must be armed only when the eventual transport adapter has an explicit pending-write state; re-arming `EPOLLOUT` merely because an earlier write event occurred would create a busy loop.

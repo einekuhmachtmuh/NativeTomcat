@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include "nt_jvm.h"
 
 #include <dlfcn.h>
@@ -392,4 +390,81 @@ bool nt_jvm_is_ready(const nt_jvm_t *jvm)
 	ready = jvm->ready;
 	pthread_mutex_unlock((pthread_mutex_t *)&jvm->mutex);
 	return ready;
+}
+
+int nt_jvm_dispatch_event(nt_jvm_t *jvm, uint64_t connection_handle, unsigned events)
+{
+	JavaVMAttachArgs attach_args;
+	JNIEnv *env = NULL;
+	jclass bootstrap_class;
+	jmethodID method;
+	jint rc;
+	bool attached = false;
+
+	if (jvm == NULL || events == 0) {
+		return -1;
+	}
+
+	pthread_mutex_lock(&jvm->mutex);
+	if (jvm->vm == NULL || jvm->bootstrap_class == NULL || jvm->stop_requested) {
+		pthread_mutex_unlock(&jvm->mutex);
+		return -1;
+	}
+	JavaVM *vm = jvm->vm;
+	jobject bootstrap_global = jvm->bootstrap_class;
+	pthread_mutex_unlock(&jvm->mutex);
+
+	rc = (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_8);
+	if (rc == JNI_EDETACHED) {
+		memset(&attach_args, 0, sizeof(attach_args));
+		attach_args.version = JNI_VERSION_1_8;
+		attach_args.name = (char *)"NativeTomcat-event-loop";
+		rc = (*vm)->AttachCurrentThread(vm, (void **)&env, &attach_args);
+		if (rc != JNI_OK) {
+			return -1;
+		}
+		attached = true;
+	} else if (rc != JNI_OK) {
+		return -1;
+	}
+
+	bootstrap_class = (*env)->NewLocalRef(env, bootstrap_global);
+	if (bootstrap_class == NULL || (*env)->ExceptionCheck(env)) {
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionDescribe(env);
+			(*env)->ExceptionClear(env);
+		}
+		if (attached) {
+			(*vm)->DetachCurrentThread(vm);
+		}
+		return -1;
+	}
+
+	method = (*env)->GetStaticMethodID(env, bootstrap_class, "dispatchNativeEvent", "(JI)V");
+	if (method == NULL || (*env)->ExceptionCheck(env)) {
+		if ((*env)->ExceptionCheck(env)) {
+			(*env)->ExceptionDescribe(env);
+			(*env)->ExceptionClear(env);
+		}
+		if (attached) {
+			(*vm)->DetachCurrentThread(vm);
+		}
+		return -1;
+	}
+
+	(*env)->CallStaticVoidMethod(env, bootstrap_class, method,
+			(jlong)connection_handle, (jint)events);
+	if ((*env)->ExceptionCheck(env)) {
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		if (attached) {
+			(*vm)->DetachCurrentThread(vm);
+		}
+		return -1;
+	}
+
+	if (attached) {
+		(*vm)->DetachCurrentThread(vm);
+	}
+	return 0;
 }
