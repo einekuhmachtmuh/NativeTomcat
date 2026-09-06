@@ -1,6 +1,7 @@
 #ifndef NT_RUNTIME_H
 #define NT_RUNTIME_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,6 +10,7 @@ extern "C" {
 #endif
 
 typedef struct nt_runtime nt_runtime_t;
+typedef struct nt_connection nt_connection_t;
 
 typedef struct nt_runtime_config {
 	const char *bind_address;
@@ -20,6 +22,7 @@ typedef struct nt_runtime_config {
 int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config);
 int nt_runtime_run(nt_runtime_t *runtime);
 void nt_runtime_stop(nt_runtime_t *runtime);
+int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write);
 void nt_runtime_destroy(nt_runtime_t *runtime);
 
 #ifdef __cplusplus
