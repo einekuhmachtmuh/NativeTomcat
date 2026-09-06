@@ -51,16 +51,19 @@
 		<mkdir dir="${native.java.classes}" />
 	</target>
 
-	<target name="java-compile" depends="tomcat-compile,init" description="Compile NativeTomcat Java bootstrap classes against the pinned Tomcat classes">
+	<target name="java-compile" depends="init" description="Formal build of the currently migrated NativeTomcat Java source slice">
 		<javac srcdir="${basedir}/java"
 			destdir="${native.java.classes}"
 			release="${java.source}"
 			includeantruntime="false"
 			debug="true"
 			encoding="UTF-8">
-			<classpath>
-				<pathelement location="${tomcat.source.dir}/output/classes" />
-			</classpath>
+			<!-- The formal tree is intentionally narrowed until the migrated Tomcat
+			     dependency closure is complete. build_test.xml remains the broader
+			     intermediate verification entry point. -->
+			<include name="org/apache/tomcat/nativebootstrap/*.java" />
+			<include name="org/apache/tomcat/util/buf/ByteBufferHolder.java" />
+			<include name="org/apache/tomcat/util/net/*.java" />
 		</javac>
 	</target>
 
@@ -81,17 +84,7 @@
 		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="compile" inheritAll="false" inheritRefs="false" />
 	</target>
 
-	<target name="native-java-compile" depends="tomcat-compile,init" description="Compile NativeTomcat Java against the pinned Tomcat classes">
-		<javac srcdir="${basedir}/java"
-			destdir="${native.java.classes}"
-			release="${java.source}"
-			includeantruntime="false"
-			debug="true"
-			encoding="UTF-8">
-			<classpath>
-				<pathelement location="${tomcat.source.dir}/output/classes" />
-			</classpath>
-		</javac>
+	<target name="native-java-compile" depends="java-compile" description="Formal-build alias for the repository-owned Java tree">
 	</target>
 
 	<target name="tomcat-deploy" depends="verify-tomcat-source" description="Run the pinned upstream Tomcat deploy target to build a working Tomcat instance">
@@ -135,7 +128,6 @@
 		<mkdir dir="${native.build.dir}" />
 		<mkdir dir="${basedir}/output/native-java/test-classes" />
 		<javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8">
-			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java" />
 			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherTest.java" />
 		</javac>
 		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
