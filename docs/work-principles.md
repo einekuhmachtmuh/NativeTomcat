@@ -69,7 +69,40 @@ source verification 後重新調整：
 - 簡潔不能透過刪除必要的錯誤處理、生命週期檢查、同步或驗證來取得。
 - 若簡潔方案與 Tomcat/Servlet/NGINX 已核實的 contract 衝突，contract 優先，不為追求短小而改變語意。
 
-## 4. 不得跳過的 gate
+## 4. 固定的事件到 Tomcat 整合順序
+
+凡將 native readiness 接入 Tomcat，必須以以下順序建立並逐層驗證，不得跳層：
+
+```text
+Native event
+    ↓
+stable native-handle ↔ Java transport object
+    ↓
+real SocketWrapperBase
+    ↓
+AbstractEndpoint.processSocket()
+    ↓
+SocketProcessorBase
+    ↓
+transport consumption
+    ↓
+native owner determines next interest
+    ↓
+exactly one rearm / close
+```
+
+這不是「所有項目都已實作」的宣告，而是 integration contract 的順序。每一層只有在上一層的 source、ownership/lifetime 與測試條件成立後才能啟用。
+
+特別規定：
+
+- `stable native-handle ↔ Java transport object` 必須有明確、可驗證的 lifetime/registry owner；不得以暫時的 Java map 或 callback 生命週期假定 native object 一定仍存在。
+- `real SocketWrapperBase` 必須是 pinned Tomcat exact source；compatibility shell 不得被視為等價實作。
+- `AbstractEndpoint.processSocket()` 與 `SocketProcessorBase` 必須沿用 pinned Tomcat 的 dispatch、executor、locking 與 lifecycle contract，不得用 surface test 代替。
+- `transport consumption` 必須是真正的 read/write/buffer/protocol consumption；Java task enqueue 不算 consumption。
+- next interest / close 的決定權必須回到 native event-loop owner；Java worker 不得直接操作 event-loop-owned epoll registration。
+- 每個完成的 event-processing cycle 必須有且只有一個 native owner action：rearm 或 close；不得雙重執行，也不得因「Java work 已 enqueue」提前執行。
+
+## 5. 不得跳過的 gate
 
 提出或執行下一步前，檢查：
 
@@ -84,7 +117,7 @@ source verification 後重新調整：
 
 若外部環境造成 blocking，可以先做不依賴該 gate 的獨立工作，但不得把 blocked gate 宣稱完成，也不得用 shell test 冒充 exact upstream integration。
 
-## 5. 必須維持的語意邊界
+## 6. 必須維持的語意邊界
 
 - 不得以 NativeTomcat shell、docs 或 roadmap 作為 Tomcat semantics 的權威來源。
 - 不得把 NGINX implementation detail 提升為 Servlet 或 Tomcat requirement。
@@ -96,7 +129,7 @@ source verification 後重新調整：
 - 不得把未取得、未核驗的 pinned source 宣稱為 migration 完成。
 - 不得因 compile 或 surface test PASS 就推定 Tomcat runtime semantics 正確。
 
-## 6. 驗證分層
+## 7. 驗證分層
 
 每項工作明確標示已達到的層級：
 
@@ -112,7 +145,7 @@ source verification 後重新調整：
 
 例如：surface test PASS ≠ Tomcat integration PASS；compile PASS ≠ runtime semantics correct；native event test PASS ≠ Servlet readiness correct；benchmark harness 可執行 ≠ benchmark result 已取得。
 
-## 7. 工作記錄
+## 8. 工作記錄
 
 每完成重要步驟，記錄：
 
