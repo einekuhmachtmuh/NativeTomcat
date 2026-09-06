@@ -28,6 +28,9 @@
 	<property name="java.source" value="17" />
 	<property name="java.target" value="17" />
 	<property name="native.java.classes" value="${basedir}/output/native-java/classes" />
+	<property name="native.build.dir" value="${basedir}/output/native" />
+	<property name="native.executable" value="${native.build.dir}/nativetomcat" />
+	<property name="native.compiler" value="gcc" />
 	<property name="tomcat.source.dir" value="${basedir}/upstream/tomcat" />
 	<property name="tomcat.build.file" value="${tomcat.source.dir}/build.xml" />
 	<property name="tomcat.expected.commit" value="cbe6e15ee81e2fc6232954292a80cca5d1e84009" />
@@ -87,8 +90,31 @@
 	<target name="native-runtime-prepare" depends="tomcat-deploy,native-java-compile" description="Build the pinned Tomcat runtime and NativeTomcat Java bridge">
 	</target>
 
+	<target name="native-compile" depends="init" description="Compile the existing Linux native sources into the NativeTomcat executable">
+		<mkdir dir="${native.build.dir}" />
+		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
+			<arg value="-std=gnu11" />
+			<arg value="-D_GNU_SOURCE" />
+			<arg value="-Wall" />
+			<arg value="-Wextra" />
+			<arg value="-Wpedantic" />
+			<arg value="-I${basedir}/native/include" />
+			<arg value="-I${env.JAVA_HOME}/include" />
+			<arg value="-I${env.JAVA_HOME}/include/linux" />
+			<arg value="-pthread" />
+			<arg value="-o" />
+			<arg value="${native.executable}" />
+			<arg value="${basedir}/native/src/main.c" />
+			<arg value="${basedir}/native/src/nt_jvm.c" />
+			<arg value="${basedir}/native/src/nt_runtime.c" />
+			<arg value="${basedir}/native/src/nt_connection.c" />
+			<arg value="-ldl" />
+		</exec>
+	</target>
+
 	<target name="clean">
 		<delete dir="${basedir}/output/native-java" />
+		<delete dir="${native.build.dir}" />
 	</target>
 
 </project>
