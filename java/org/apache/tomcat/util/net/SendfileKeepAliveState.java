@@ -17,22 +17,24 @@
 package org.apache.tomcat.util.net;
 
 /**
- * Defines the progress state of a sendfile operation.
+ * Defines the keep-alive state of a connection during sendfile processing.
  */
-public enum SendfileState {
+public enum SendfileKeepAliveState {
 
     /**
-     * The sending of the file has started but has not completed. Sendfile is still using the socket.
+     * Keep-alive is not in use. The socket can be closed when the response has been written.
      */
-    PENDING,
+    NONE,
 
     /**
-     * The file has been fully sent. Sendfile is no longer using the socket.
+     * Keep-alive is in use and there is pipelined data in the input buffer to be read as soon as the current response
+     * has been written.
      */
-    DONE,
+    PIPELINED,
 
     /**
-     * Something went wrong. The file may or may not have been sent. The socket is in an unknown state.
+     * Keep-alive is in use. The socket should be added to the poller (or equivalent) to await more data as soon as the
+     * current response has been written.
      */
-    ERROR
+    OPEN
 }
