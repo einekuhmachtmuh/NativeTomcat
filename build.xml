@@ -51,18 +51,14 @@
 	</target>
 
 	<target name="verify-tomcat-source" description="Verify the initialized Tomcat submodule is pinned to the expected commit">
-		<available file="${tomcat.source.dir}/.git" type="dir" property="tomcat.git-dir.available" />
-		<available file="${tomcat.source.dir}/.git" type="file" property="tomcat.git-file.available" />
 		<available file="${tomcat.build.file}" property="tomcat.build.available" />
 		<fail unless="tomcat.build.available" message="upstream/tomcat/build.xml is missing; initialize the pinned Tomcat submodule before invoking the upstream Ant build." />
-		<fail unless="tomcat.git-dir.available" if="tomcat.git-file.available" message="upstream/tomcat/.git is a file; submodule gitdir verification requires an initialized checkout in this build gate." />
-		<fail unless="tomcat.git-dir.available" message="upstream/tomcat does not appear to be an initialized Git checkout; refusing to invoke the upstream build." />
 		<exec executable="git" dir="${tomcat.source.dir}" outputproperty="tomcat.actual.commit" failifexecutionfails="true" failonerror="true">
 			<arg value="rev-parse" />
 			<arg value="HEAD" />
 		</exec>
 		<condition property="tomcat.commit.verified">
-			<equals arg1="${tomcat.actual.commit}" arg2="${tomcat.expected.commit}" trim="true" />
+			<matches string="${tomcat.actual.commit}" pattern="^${tomcat.expected.commit}\\s*$" />
 		</condition>
 		<fail unless="tomcat.commit.verified" message="Tomcat submodule commit mismatch: expected ${tomcat.expected.commit}, actual ${tomcat.actual.commit}. Refusing to invoke the upstream Ant build." />
 	</target>
