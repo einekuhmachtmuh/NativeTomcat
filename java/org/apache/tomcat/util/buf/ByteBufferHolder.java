@@ -24,52 +24,52 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class ByteBufferHolder {
 
-	private final ByteBuffer buf;
-	private final AtomicBoolean flipped;
+    private final ByteBuffer buf;
+    private final AtomicBoolean flipped;
 
-	/**
-	 * Constructs a holder for the specified buffer.
-	 *
-	 * @param buf the buffer
-	 * @param flipped initial flipped state
-	 */
-	public ByteBufferHolder(ByteBuffer buf, boolean flipped) {
-		this.buf = buf;
-		this.flipped = new AtomicBoolean(flipped);
-	}
-
-
-	/**
-	 * Returns the wrapped buffer.
-	 *
-	 * @return the buffer
-	 */
-	public ByteBuffer getBuf() {
-		return buf;
-	}
+    /**
+     * Constructs a holder for the specified buffer.
+     *
+     * @param buf the buffer
+     * @param flipped initial flipped state
+     */
+    public ByteBufferHolder(ByteBuffer buf, boolean flipped) {
+        this.buf = buf;
+        this.flipped = new AtomicBoolean(flipped);
+    }
 
 
-	/**
-	 * Returns whether the buffer has been flipped.
-	 *
-	 * @return true if flipped
-	 */
-	public boolean isFlipped() {
-		return flipped.get();
-	}
+    /**
+     * Returns the wrapped buffer.
+     *
+     * @return the buffer
+     */
+    public ByteBuffer getBuf() {
+        return buf;
+    }
 
 
-	/**
-	 * Flips the buffer if not already flipped.
-	 *
-	 * @return true if the buffer was flipped by this call
-	 */
-	public boolean flip() {
-		if (flipped.compareAndSet(false, true)) {
-			buf.flip();
-			return true;
-		} else {
-			return false;
-		}
-	}
+    /**
+     * Returns whether the buffer has been flipped.
+     *
+     * @return true if flipped
+     */
+    public boolean isFlipped() {
+        return flipped.get();
+    }
+
+
+    /**
+     * Flips the buffer if not already flipped.
+     *
+     * @return true if the buffer was flipped by this call
+     */
+    public boolean flip() {
+        if (flipped.compareAndSet(false, true)) {
+            buf.flip();
+            return true;
+        } else {
+            return false;
+        }
+    }
 }

@@ -23,48 +23,48 @@ import java.nio.ByteBuffer;
  */
 public interface ApplicationBufferHandler {
 
-	/**
-	 * Empty byte buffer constant.
-	 */
-	ByteBuffer EMPTY_BUFFER = ByteBuffer.allocate(0);
+    /**
+     * Empty byte buffer constant.
+     */
+    ByteBuffer EMPTY_BUFFER = ByteBuffer.allocate(0);
 
-	/**
-	 * No-op implementation of the buffer handler.
-	 */
-	ApplicationBufferHandler EMPTY = new ApplicationBufferHandler() {
-		@Override
-		public void expand(int newSize) {
-		}
+    /**
+     * No-op implementation of the buffer handler.
+     */
+    ApplicationBufferHandler EMPTY = new ApplicationBufferHandler() {
+        @Override
+        public void expand(int newSize) {
+        }
 
-		@Override
-		public void setByteBuffer(ByteBuffer buffer) {
-		}
+        @Override
+        public void setByteBuffer(ByteBuffer buffer) {
+        }
 
-		@Override
-		public ByteBuffer getByteBuffer() {
-			return EMPTY_BUFFER;
-		}
-	};
+        @Override
+        public ByteBuffer getByteBuffer() {
+            return EMPTY_BUFFER;
+        }
+    };
 
-	/**
-	 * Set the byte buffer.
-	 *
-	 * @param buffer the byte buffer
-	 */
-	void setByteBuffer(ByteBuffer buffer);
+    /**
+     * Set the byte buffer.
+     *
+     * @param buffer the byte buffer
+     */
+    void setByteBuffer(ByteBuffer buffer);
 
-	/**
-	 * Returns the current byte buffer.
-	 *
-	 * @return the byte buffer
-	 */
-	ByteBuffer getByteBuffer();
+    /**
+     * Returns the current byte buffer.
+     *
+     * @return the byte buffer
+     */
+    ByteBuffer getByteBuffer();
 
-	/**
-	 * Expand the byte buffer to at least the given size. Some implementations may not implement this.
-	 *
-	 * @param size the desired size
-	 */
-	void expand(int size);
+    /**
+     * Expand the byte buffer to at least the given size. Some implementations may not implement this.
+     *
+     * @param size the desired size
+     */
+    void expand(int size);
 
 }
