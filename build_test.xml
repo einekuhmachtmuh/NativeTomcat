@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Mandatory rule: before migrating a Tomcat Java source file, check whether the exact path already exists under java/. -->
+<project name="NativeTomcatTestBuild" default="verify" basedir=".">
+	<!--
+		MANDATORY SOURCE-MIGRATION RULE: any Tomcat Java source materially involved in
+		implementation/planning/verification must first be copied to java/ at its exact
+		original package path, and this build file must then be updated to account for it.
+	-->
+	<!--
+		BUILD VERIFICATION ONLY. This file is the repository's intermediate build-verification
+		entry point while Tomcat's Java source is being moved into this repository. It deliberately does not invoke upstream/tomcat/build.xml.
+		The native event/JVM bridge and the copied Tomcat source slice are verified
+		independently until the repository contains a self-hosted Tomcat source tree.
+	-->
+	<property environment="env"/>
+	<property name="java.source" value="17"/>
+	<property name="java.classes" value="${basedir}/output/test-build/classes"/>
+	<property name="java.test.classes" value="${basedir}/output/test-build/test-classes"/>
+	<property name="native.build.dir" value="${basedir}/output/test-build/native"/>
+	<property name="native.compiler" value="gcc"/>
+	<property name="java.home" value="${java.home}"/>
+
+	<target name="init">
+		<mkdir dir="${java.classes}"/>
+		<mkdir dir="${java.test.classes}"/>
+		<mkdir dir="${native.build.dir}"/>
+	</target>
+
+	<target name="verify-tomcat-source-slice" depends="init">
+		<available file="${basedir}/java/org/apache/catalina/Server.java" property="server.present"/>
+		<available file="${basedir}/java/org/apache/catalina/Service.java" property="service.present"/>
+		<available file="${basedir}/java/org/apache/coyote/ProtocolHandler.java" property="protocol-handler.present"/>
+		<available file="${basedir}/java/org/apache/tomcat/util/net/SocketWrapperBase.java" property="socket-wrapper.present"/>
+		<available file="${basedir}/java/org/apache/tomcat/util/net/NativeSocketWrapper.java" property="native-socket-wrapper.present"/>
+		<available file="${basedir}/java/org/apache/tomcat/util/net/SocketProcessorBase.java" property="socket-processor.present"/>
+		<fail unless="server.present" message="Missing copied Tomcat source: org/apache/catalina/Server.java"/>
+		<fail unless="service.present" message="Missing copied Tomcat source: org/apache/catalina/Service.java"/>
+		<fail unless="protocol-handler.present" message="Missing copied Tomcat source: org/apache/coyote/ProtocolHandler.java"/>
+		<fail unless="socket-wrapper.present" message="Missing SocketWrapperBase surface: org/apache/tomcat/util/net/SocketWrapperBase.java"/>
+		<fail unless="native-socket-wrapper.present" message="Missing concrete SocketWrapperBase surface: org/apache/tomcat/util/net/NativeSocketWrapper.java"/>
+		<fail unless="socket-processor.present" message="Missing SocketProcessorBase surface: org/apache/tomcat/util/net/SocketProcessorBase.java"/>
+	</target>
+
+	<target name="java-compile" depends="verify-tomcat-source-slice,init">
+		<javac srcdir="${basedir}/java" destdir="${java.classes}"
+			release="${java.source}" includeantruntime="false"
+			debug="true" encoding="UTF-8">
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java"/>
+			<include name="org/apache/tomcat/nativebootstrap/NativeTomcatBootstrap.java"/>
+			<include name="org/apache/tomcat/util/net/*.java"/>
+		</javac>
+	</target>
+
+	<target name="java-unit-test" depends="java-compile">
+		<javac srcdir="${basedir}/java" destdir="${java.test.classes}"
+			release="${java.source}" includeantruntime="false"
+			debug="true" encoding="UTF-8">
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java"/>
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherUnitTest.java"/>
+			<include name="org/apache/tomcat/util/net/*.java"/>
+		</javac>
+		<java classname="org.apache.tomcat.nativebootstrap.NativeEventDispatcherUnitTest" fork="true" failonerror="true">
+			<classpath><pathelement location="${java.test.classes}"/></classpath>
+		</java>
+	</target>
+
+	<target name="native-runtime-test" depends="init">
+		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
+			<arg value="-std=gnu11"/>
+			<arg value="-D_GNU_SOURCE"/>
+			<arg value="-Wall"/>
+			<arg value="-Wextra"/>
+			<arg value="-Wpedantic"/>
+			<arg value="-Werror"/>
+			<arg value="-I${basedir}/native/include"/>
+			<arg value="-pthread"/>
+			<arg value="-o"/>
+			<arg value="${native.build.dir}/nt_runtime_test"/>
+			<arg value="${basedir}/native/tests/nt_runtime_test.c"/>
+			<arg value="${basedir}/native/src/nt_runtime.c"/>
+			<arg value="${basedir}/native/src/nt_connection.c"/>
+		</exec>
+		<exec executable="${native.build.dir}/nt_runtime_test" failifexecutionfails="true" failonerror="true"/>
+	</target>
+
+	<target name="socket-wrapper-surface-test" depends="java-compile">
+		<javac srcdir="${basedir}/java" destdir="${java.test.classes}"
+			release="${java.source}" includeantruntime="false"
+			debug="true" encoding="UTF-8">
+			<include name="org/apache/tomcat/nativebootstrap/SocketWrapperSurfaceTest.java"/>
+			<include name="org/apache/tomcat/util/net/*.java"/>
+		</javac>
+		<java classname="org.apache.tomcat.nativebootstrap.SocketWrapperSurfaceTest" fork="true" failonerror="true">
+			<classpath><pathelement location="${java.test.classes}"/></classpath>
+		</java>
+	</target>
+
+	<target name="native-jvm-dispatch-test" depends="init">
+		<javac srcdir="${basedir}/java" destdir="${java.test.classes}"
+			release="${java.source}" includeantruntime="false"
+			debug="true" encoding="UTF-8">
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java"/>
+			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherTest.java"/>
+		</javac>
+		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
+			<arg value="-std=gnu11"/>
+			<arg value="-D_GNU_SOURCE"/>
+			<arg value="-Wall"/>
+			<arg value="-Wextra"/>
+			<arg value="-Wpedantic"/>
+			<arg value="-Werror"/>
+			<arg value="-I${basedir}/native/include"/>
+			<arg value="-I${java.home}/include"/>
+			<arg value="-I${java.home}/include/linux"/>
+			<arg value="-pthread"/>
+			<arg value="-o"/>
+			<arg value="${native.build.dir}/nt_jvm_dispatch_test"/>
+			<arg value="${basedir}/native/tests/nt_jvm_dispatch_test.c"/>
+			<arg value="${basedir}/native/src/nt_jvm.c"/>
+			<arg value="-ldl"/>
+		</exec>
+		<exec executable="${native.build.dir}/nt_jvm_dispatch_test" failifexecutionfails="true" failonerror="true">
+			<env key="NATIVETOMCAT_JAVA_TEST_CP" path="${java.test.classes}"/>
+		</exec>
+	</target>
+
+	<target name="native-compile" depends="init">
+		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
+			<arg value="-std=gnu11"/>
+			<arg value="-D_GNU_SOURCE"/>
+			<arg value="-Wall"/>
+			<arg value="-Wextra"/>
+			<arg value="-Wpedantic"/>
+			<arg value="-Werror"/>
+			<arg value="-I${basedir}/native/include"/>
+			<arg value="-I${java.home}/include"/>
+			<arg value="-I${java.home}/include/linux"/>
+			<arg value="-pthread"/>
+			<arg value="-o"/>
+			<arg value="${native.build.dir}/nativetomcat"/>
+			<arg value="${basedir}/native/src/main.c"/>
+			<arg value="${basedir}/native/src/nt_jvm.c"/>
+			<arg value="${basedir}/native/src/nt_runtime.c"/>
+			<arg value="${basedir}/native/src/nt_connection.c"/>
+			<arg value="-ldl"/>
+		</exec>
+	</target>
+
+	<target name="verify" depends="verify-tomcat-source-slice,java-unit-test,socket-wrapper-surface-test,native-runtime-test,native-jvm-dispatch-test,native-compile"/>
+
+	<target name="clean">
+		<delete dir="${basedir}/output/test-build"/>
+	</target>
+</project>
