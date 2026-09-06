@@ -1,65 +1,118 @@
-# Upstream source mapping — initial pass
+# Upstream source mapping
 
-## Verified baseline
+This document records source-level facts verified against Apache Tomcat 11.0.25 and NGINX 1.30.4. It is intentionally limited to inspected paths and does not claim to be a complete implementation inventory.
 
-### Apache Tomcat 11.0.25
+## Tomcat network and request path
 
-Apache's official download/documentation pages identify 11.0.25 as the current Tomcat 11.0.x release at the time of this analysis. Tomcat 11.0.25 implements Jakarta Servlet 6.1. The Tomcat build documentation states that building 11.0.25 requires JDK 22 or later and Apache Ant 1.10.2 or later.
+| Stage | Upstream implementation | Verified fact | NativeTomcat decision |
+|---|---|---|---|
+| Connector construction | `java/org/apache/catalina/connector/Connector.java` | The default `Connector()` selects HTTP/1.1 and protocol creation is delegated to `ProtocolHandler.create()` | Keep Connector/Catalina lifecycle in Java |
+| Protocol handler | `java/org/apache/coyote/AbstractProtocol.java`, `AbstractHttp11Protocol.java` | `AbstractProtocol` owns an `AbstractEndpoint`; an `Adapter` links protocol processing to the container | Preserve the Java Adapter boundary initially |
+| Endpoint lifecycle | `java/org/apache/tomcat/util/net/AbstractEndpoint.java`, `NioEndpoint.java` | Endpoint state includes running/paused state, an acceptor, connection tracking, processor/event caches and an executor | Native endpoint may replace low-level I/O only after equivalent lifecycle semantics are specified |
+| Accept | `NioEndpoint.serverSocketAccept()` and `Acceptor.run()` | The acceptor accepts a socket, checks endpoint state and hands the socket to `setSocketOptions()` | C accept/event-loop candidate |
+| Connection registration | `NioEndpoint.setSocketOptions()` | A channel/wrapper is created or reused, socket properties and timeouts are configured, and the socket is registered with the Poller | C connection state must explicitly own equivalent state |
+| Poller | `NioEndpoint.Poller` | Registration events are queued; the selector is woken when necessary; readable/writable keys are processed and dispatched as socket events | Strong native candidate; Java event semantics remain above the boundary |
+| Socket wrapper | `SocketWrapperBase` / `NioSocketWrapper` | The wrapper owns socket buffers, timeouts, keep-alive state, error state, processor association and non-blocking read/write state | Do not translate field-for-field; define a smaller native connection state with explicit ownership/lifetime |
+| HTTP request line | `Http11InputBuffer.parseRequestLine()` | Parsing is incremental and stateful and can return before completion when more bytes are required | Native parser must be incremental, bounded and resumable |
+| HTTP headers/body framing | `Http11InputBuffer`, `Http11Processor.prepareInputFilters()` | Header parsing and transfer/content-length decisions feed an input-filter chain; malformed framing changes response/error/keep-alive state | Native parser may produce a validated wire representation, but Servlet-visible framing semantics must remain equivalent |
+| Request preparation | `Http11Processor.prepareRequest()` | It validates Host, URI, transfer encoding, content length, SNI and related protocol state | Security-critical; native implementation requires differential tests against Tomcat |
+| Servlet dispatch | `CoyoteAdapter.service()` | It creates/links Catalina Request/Response objects, performs request preparation and invokes the container pipeline | Keep in Java |
+| Filter/Servlet execution | `StandardWrapperValve.invoke()` | It allocates the servlet, creates the application filter chain and invokes `filterChain.doFilter()` | Keep in Java |
+| Async dispatch | `CoyoteAdapter.asyncDispatch()` / `AbstractProcessor` | Async read/write/error events re-enter container processing and have explicit error and recycling rules | Keep semantic state machine in Java; native layer emits events |
+| Response framing | `Http11Processor.prepareResponse()` / `Http11OutputBuffer` | Response framing chooses identity/chunked/void filters, compression, Connection handling and headers before commit | Keep response policy in Java initially; native layer may own final buffered write path later |
+| Recycle | `Http11InputBuffer.nextRequest()` / `Http11OutputBuffer.nextRequest()` / `CoyoteAdapter` | Request/response and filters are explicitly recycled between keep-alive requests | Native connection buffers need an explicit per-request reset boundary |
 
-Primary source: https://tomcat.apache.org/tomcat-11.0-doc/building.html
+## Verified Tomcat source relationships
 
-Git source ref: `11.0.25`
+The source path is not simply `socket -> servlet`:
 
-### NGINX 1.30.4
+```text
+NioEndpoint
+  acceptor
+    -> setSocketOptions
+      -> NioSocketWrapper / Poller registration
+        -> SocketProcessor / Processor
+          -> Http11Processor
+            -> Http11InputBuffer / Http11OutputBuffer
+              -> CoyoteAdapter
+                -> Catalina pipeline
+                  -> FilterChain
+                    -> Servlet
+```
 
-The official NGINX download page identifies 1.30.4 as the stable release. The source repository ref used for source inspection is `release-1.30.4`.
+`CoyoteAdapter` is therefore a semantic boundary rather than a convenient place to translate every object to C. `AbstractProcessor` also contains async state and error handling that must not be recreated as an unverified native approximation.
 
-Primary source: https://nginx.org/en/download.html
+## Request/response ownership model to implement
 
-## Tomcat request-path facts verified from source
+The next native design must explicitly specify, for every native/Java field:
 
-### NioEndpoint
+- representation;
+- owner;
+- lifetime;
+- mutability;
+- thread affinity;
+- synchronization;
+- copy/no-copy status;
+- error/cancellation behaviour.
 
-`org.apache.tomcat.util.net.NioEndpoint` is a Java NIO network endpoint built on `ServerSocketChannel`, `SocketChannel`, `Selector`, `ByteBuffer`, and Tomcat's endpoint/poller abstractions. It also contains channel and buffer caches and socket lifecycle state.
+In particular, the native layer must not free or recycle a buffer while Java `ByteBuffer`/Servlet code can still observe it.
 
-Source: https://github.com/apache/tomcat/blob/11.0.25/java/org/apache/tomcat/util/net/NioEndpoint.java
+## NGINX reference
 
-### Http11Processor
+NGINX 1.30.4 source inspection confirms an event-driven architecture with an event core, platform event modules and posted-event queues. `ngx_event_process_posted()` drains queued handlers, while the official development guide describes posted events as deferred work within the event-loop iteration after I/O and timer processing.
 
-`org.apache.coyote.http11.Http11Processor` owns HTTP/1.1 request/response processing and has explicit input/output buffer objects, an HTTP parser, keep-alive state, content delimitation state, and upgrade/sendfile state. Its constructor obtains the protocol parser and creates the HTTP input/output buffers.
+Relevant paths:
 
-Source: https://github.com/apache/tomcat/blob/11.0.25/java/org/apache/coyote/http11/Http11Processor.java
+- `src/event/ngx_event.c`
+- `src/event/ngx_event_posted.c`
 
-### CoyoteAdapter
+The design lesson is event-loop separation and explicit deferred work, not copying NGINX data structures wholesale.
 
-`org.apache.catalina.connector.CoyoteAdapter` implements the Coyote-to-Catalina adapter. The source contains explicit async dispatch handling, Servlet `ReadListener`/`WriteListener` interaction, request/response note objects, context class-loader binding, error propagation and socket-close actions. This makes it a critical Java semantic boundary and not an obvious candidate for wholesale C translation.
+## Servlet 6.1 boundary
 
-Source: https://github.com/apache/tomcat/blob/11.0.25/java/org/apache/catalina/connector/CoyoteAdapter.java
+Tomcat 11.0.25 documents and exposes Servlet 6.1. The Servlet API defines the application/container contract and Servlet lifecycle. Consequently, accepting TCP and parsing HTTP is not evidence of Servlet compatibility.
 
-## NGINX event facts verified from source
+The Java side must continue to own at least:
 
-### Event core
+- Servlet lifecycle;
+- application class loading/isolation;
+- Filter and Listener execution;
+- URL/context/wrapper mapping;
+- application-facing Request/Response semantics;
+- Servlet async lifecycle and callbacks;
+- application exception/error semantics;
+- JSP/Jasper integration.
 
-`src/event/ngx_event.c` defines event configuration and state including worker connection capacity, event backend selection, multi-accept, accept mutex configuration, and connection counters. The source also references platform event modules such as epoll and kqueue.
+## Current native boundary
 
-Source: https://github.com/nginx/nginx/blob/release-1.30.4/src/event/ngx_event.c
+```text
+C native
+  listener / event loop
+      -> native connection state
+      -> incremental HTTP wire parsing
+      -> bounded input/output buffers
+      -> readiness events
+      -> bulk bridge
 
-### Posted events
+Java/Tomcat
+  Coyote request/response
+      -> Connector / Adapter
+      -> mapping / Context / Wrapper
+      -> FilterChain
+      -> Servlet
+      -> async lifecycle / application semantics
 
-`src/event/ngx_event_posted.c` maintains posted-event queues and processes queued handlers through `ngx_event_process_posted()`. This is relevant to a NativeTomcat event-loop design because readiness notification and deferred handler execution should be considered separately.
+C native
+  response bytes
+      -> buffered write / readiness
+      -> socket
+```
 
-Source: https://github.com/nginx/nginx/blob/release-1.30.4/src/event/ngx_event_posted.c
+This boundary remains provisional. Profiling and differential testing can move the boundary later.
 
-## Servlet 6.1 constraint
+## Non-decisions
 
-The Servlet API documentation defines the `Servlet` lifecycle (`init`, `service`, `destroy`) and the container/application contract. Therefore the first native prototype must not claim Servlet compatibility merely because it can accept TCP connections: compatibility begins only after the Java Servlet lifecycle, request/response contract, mapping and error semantics are integrated and tested.
-
-Primary source: https://tomcat.apache.org/tomcat-11.0-doc/servletapi/jakarta/servlet/Servlet.html
-
-## Current implementation boundary
-
-The initial native code is deliberately only a runtime scaffold: listener creation, non-blocking accept and an epoll wait loop. It does not yet implement connection state, HTTP parsing, request/response bridging, Servlet dispatch, keep-alive, TLS, back-pressure or Java integration. It therefore makes no compatibility or performance claim.
-
-## Important limitation
-
-The coding environment's local shell cannot resolve GitHub, so upstream repositories cannot currently be cloned into the local filesystem. Repository writes are available through the GitHub integration, and selected upstream files have been verified through the GitHub source interface. Full Ant compilation, integration testing and benchmark execution require a build host with the upstream Tomcat source tree and dependencies available.
+- No claim that native HTTP parsing is faster than Tomcat's Java parser.
+- No claim that JNI is the preferred interop mechanism; FFM and other bulk-transfer designs remain open.
+- No claim that the current native runtime is Servlet-compatible.
+- No benchmark result is recorded here.
