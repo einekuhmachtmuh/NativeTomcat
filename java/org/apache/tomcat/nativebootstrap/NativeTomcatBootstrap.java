@@ -21,4 +21,12 @@ public final class NativeTomcatBootstrap {
 		// Tomcat/Catalina integration is intentionally deferred until the
 		// embedded JVM lifecycle and class-loading contract are verified.
 	}
+
+	/**
+	 * Shutdown hook for the native process.
+	 */
+	public static void shutdown() {
+		// Tomcat/Catalina shutdown is intentionally deferred until the
+		// embedded startup path has been verified.
+	}
 }
