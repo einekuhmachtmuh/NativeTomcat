@@ -10,6 +10,7 @@ struct nt_connection {
 	nt_runtime_t *runtime;
 	int fd;
 	atomic_int state;
+	atomic_bool peer_read_closed;
 };
 
 int nt_connection_create(nt_connection_t **connection, nt_runtime_t *runtime, int fd) {
@@ -26,6 +27,7 @@ int nt_connection_create(nt_connection_t **connection, nt_runtime_t *runtime, in
 	value->runtime = runtime;
 	value->fd = fd;
 	atomic_init(&value->state, NT_CONNECTION_ACTIVE);
+	atomic_init(&value->peer_read_closed, false);
 	*connection = value;
 	return 0;
 }
@@ -52,6 +54,19 @@ nt_connection_state_t nt_connection_get_state(const nt_connection_t *connection)
 	return (nt_connection_state_t)atomic_load_explicit(&connection->state, memory_order_acquire);
 }
 
+bool nt_connection_peer_read_closed(const nt_connection_t *connection) {
+	if (connection == NULL) {
+		return true;
+	}
+	return atomic_load_explicit(&connection->peer_read_closed, memory_order_acquire);
+}
+
+void nt_connection_mark_peer_read_closed(nt_connection_t *connection) {
+	if (connection != NULL) {
+		atomic_store_explicit(&connection->peer_read_closed, true, memory_order_release);
+	}
+}
+
 int nt_connection_read(nt_connection_t *connection, void *buffer, size_t length, ssize_t *result) {
 	if (connection == NULL || result == NULL || (buffer == NULL && length != 0)) {
 		errno = EINVAL;
@@ -64,12 +79,18 @@ int nt_connection_read(nt_connection_t *connection, void *buffer, size_t length,
 
 	ssize_t value = recv(connection->fd, buffer, length, 0);
 	if (value >= 0) {
+		if (value == 0) {
+			nt_connection_mark_peer_read_closed(connection);
+		}
 		*result = value;
 		return 0;
 	}
-	if (errno == EBADF || errno == ECONNRESET || errno == ENOTCONN) {
-		atomic_store_explicit(&connection->state, NT_CONNECTION_CLOSING, memory_order_release);
+
+	int error = errno;
+	if (error == EBADF || error == ECONNRESET || error == ENOTCONN) {
+		nt_connection_close(connection);
 	}
+	errno = error;
 	return -1;
 }
 
@@ -88,9 +109,12 @@ int nt_connection_write(nt_connection_t *connection, const void *buffer, size_t 
 		*result = value;
 		return 0;
 	}
-	if (errno == EBADF || errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-		atomic_store_explicit(&connection->state, NT_CONNECTION_CLOSING, memory_order_release);
+
+	int error = errno;
+	if (error == EBADF || error == ECONNRESET || error == EPIPE || error == ENOTCONN) {
+		nt_connection_close(connection);
 	}
+	errno = error;
 	return -1;
 }
 
