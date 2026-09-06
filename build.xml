@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ Licensed to the Apache Software Foundation (ASF) under one or more
+ contributor license agreements. See the NOTICE file distributed with
+ this work for additional information regarding copyright ownership.
+ The ASF licenses this file to You under the Apache License, Version 2.0
+ (the "License"); you may not use this file except in compliance with
+ the License. You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<project name="NativeTomcat" default="java-compile" basedir=".">
+
+	<!--
+		The upstream Tomcat Ant build remains the authoritative build for
+		Tomcat itself. This top-level file only provides NativeTomcat's
+		minimal Java smoke-build target and must not replace upstream build.xml.
+	-->
+	<property name="java.home" value="${java.home}" />
+	<property environment="env" />
+	<property name="java.source" value="17" />
+	<property name="java.target" value="17" />
+	<property name="native.java.classes" value="${basedir}/output/native-java/classes" />
+
+	<path id="native.java.sources">
+		<pathelement location="${basedir}/java" />
+	</path>
+
+	<target name="init">
+		<mkdir dir="${native.java.classes}" />
+	</target>
+
+	<target name="java-compile" depends="init" description="Compile NativeTomcat Java bootstrap classes">
+		<javac srcdir="${basedir}/java"
+			destdir="${native.java.classes}"
+			release="${java.source}"
+			includeantruntime="false"
+			debug="true"
+			encoding="UTF-8">
+		</javac>
+	</target>
+
+	<target name="clean">
+		<delete dir="${basedir}/output/native-java" />
+	</target>
+
+</project>
