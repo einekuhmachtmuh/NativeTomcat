@@ -67,55 +67,69 @@ void nt_connection_mark_peer_read_closed(nt_connection_t *connection) {
 	}
 }
 
-int nt_connection_read(nt_connection_t *connection, void *buffer, size_t length, ssize_t *result) {
+nt_connection_io_result_t nt_connection_read(nt_connection_t *connection, void *buffer, size_t length, ssize_t *result) {
 	if (connection == NULL || result == NULL || (buffer == NULL && length != 0)) {
 		errno = EINVAL;
-		return -1;
+		return NT_CONNECTION_IO_ERROR;
 	}
 	if (nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
 		errno = EBADF;
-		return -1;
+		return NT_CONNECTION_IO_ERROR;
 	}
 
 	ssize_t value = recv(connection->fd, buffer, length, 0);
-	if (value >= 0) {
-		if (value == 0) {
-			nt_connection_mark_peer_read_closed(connection);
-		}
+	if (value > 0) {
 		*result = value;
-		return 0;
+		return NT_CONNECTION_IO_OK;
+	}
+	if (value == 0) {
+		*result = 0;
+		nt_connection_mark_peer_read_closed(connection);
+		return NT_CONNECTION_IO_EOF;
 	}
 
 	int error = errno;
+	if (error == EINTR) {
+		errno = error;
+		return NT_CONNECTION_IO_WOULD_BLOCK;
+	}
+	if (error == EAGAIN || error == EWOULDBLOCK) {
+		errno = error;
+		return NT_CONNECTION_IO_WOULD_BLOCK;
+	}
 	if (error == EBADF || error == ECONNRESET || error == ENOTCONN) {
 		nt_connection_close(connection);
 	}
 	errno = error;
-	return -1;
+	return NT_CONNECTION_IO_ERROR;
 }
 
-int nt_connection_write(nt_connection_t *connection, const void *buffer, size_t length, ssize_t *result) {
+nt_connection_io_result_t nt_connection_write(nt_connection_t *connection, const void *buffer, size_t length, ssize_t *result) {
 	if (connection == NULL || result == NULL || (buffer == NULL && length != 0)) {
 		errno = EINVAL;
-		return -1;
+		return NT_CONNECTION_IO_ERROR;
 	}
 	if (nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
 		errno = EBADF;
-		return -1;
+		return NT_CONNECTION_IO_ERROR;
 	}
 
 	ssize_t value = send(connection->fd, buffer, length, MSG_NOSIGNAL);
 	if (value >= 0) {
 		*result = value;
-		return 0;
+		return NT_CONNECTION_IO_OK;
 	}
 
 	int error = errno;
+	if (error == EINTR || error == EAGAIN || error == EWOULDBLOCK) {
+		errno = error;
+		return NT_CONNECTION_IO_WOULD_BLOCK;
+	}
 	if (error == EBADF || error == ECONNRESET || error == EPIPE || error == ENOTCONN) {
 		nt_connection_close(connection);
 	}
 	errno = error;
-	return -1;
+	return NT_CONNECTION_IO_ERROR;
 }
 
 void nt_connection_close(nt_connection_t *connection) {
