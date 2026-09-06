@@ -58,7 +58,7 @@
 			<arg value="HEAD" />
 		</exec>
 		<condition property="tomcat.commit.verified">
-			<matches string="${tomcat.actual.commit}" pattern="^${tomcat.expected.commit}\\s*$" />
+			<matches string="${tomcat.actual.commit}" pattern="^${tomcat.expected.commit}\s*$" />
 		</condition>
 		<fail unless="tomcat.commit.verified" message="Tomcat submodule commit mismatch: expected ${tomcat.expected.commit}, actual ${tomcat.actual.commit}. Refusing to invoke the upstream Ant build." />
 	</target>
