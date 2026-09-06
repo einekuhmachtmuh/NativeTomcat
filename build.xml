@@ -67,8 +67,24 @@
 		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="compile" inheritAll="false" inheritRefs="false" />
 	</target>
 
+	<target name="native-java-compile" depends="tomcat-compile,init" description="Compile NativeTomcat Java against the pinned Tomcat classes">
+		<javac srcdir="${basedir}/java"
+			destdir="${native.java.classes}"
+			release="${java.source}"
+			includeantruntime="false"
+			debug="true"
+			encoding="UTF-8">
+			<classpath>
+				<pathelement location="${tomcat.source.dir}/output/classes" />
+			</classpath>
+		</javac>
+	</target>
+
 	<target name="tomcat-deploy" depends="verify-tomcat-source" description="Run the pinned upstream Tomcat deploy target to build a working Tomcat instance">
 		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="deploy" inheritAll="false" inheritRefs="false" />
+	</target>
+
+	<target name="native-runtime-prepare" depends="tomcat-deploy,native-java-compile" description="Build the pinned Tomcat runtime and NativeTomcat Java bridge">
 	</target>
 
 	<target name="clean">
