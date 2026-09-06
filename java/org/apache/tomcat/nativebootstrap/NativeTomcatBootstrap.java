@@ -49,8 +49,8 @@ public final class NativeTomcatBootstrap {
 		}
 
 		Bootstrap instance = bootstrap;
-		bootstrap = null;
 		instance.stop();
+		bootstrap = null;
 	}
 
 	private static String requireEnvironment(String name) {
