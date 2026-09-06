@@ -78,28 +78,34 @@ native epoll thread
 
 This is a concurrency boundary, not yet a Tomcat transport boundary. The queued task currently stops before `SocketWrapperBase`, `AbstractEndpoint.processSocket()`, `SocketProcessorBase`, and `Http11Processor`.
 
-## 7. Current EPOLLONESHOT state
+## 7. Current EPOLLONESHOT and close state
 
 The previous native callback rearmed immediately after `nt_jvm_dispatch_event()`. That was inconsistent with this contract because JNI dispatch only queues Java work.
 
-The implementation has now been corrected: the NativeTomcat connection handler **does not rearm after asynchronous Java dispatch**. It only closes on dispatch failure or terminal peer/error events.
+The implementation has now been corrected in two ways:
 
-Consequently a connection that reaches the current Java event-dispatch boundary remains one-shot disabled until a real transport/Tomcat consumption path is implemented. This is intentional and safer than falsely treating Java task submission as consumption.
+1. it **does not rearm after asynchronous Java dispatch**;
+2. it **does not close a peer-half-closed/error connection immediately after dispatch**, because the queued Java task has not yet consumed the terminal transport event.
 
-The required integrated model remains:
+The only immediate close at this boundary is failure to dispatch the event into Java. Otherwise the connection remains owned by the runtime and one-shot disabled until a real transport/Tomcat consumer determines the next action.
+
+Consequently the current safe boundary is:
 
 ```text
-current safe boundary:
+normal event:
   epoll event -> JNI enqueue -> no rearm
+
+terminal event:
+  epoll event -> JNI enqueue -> no rearm / no immediate close
 
 required integrated model:
   epoll event -> ownership transfer/dispatch
              -> actual transport/Tomcat consumption
-             -> next interest set
-             -> exactly one rearm by native event-loop owner
+             -> next interest/close decision
+             -> exactly one native-owner action
 ```
 
-This means the current native listener is **not yet an end-to-end transport path**. The missing rearm is an explicit integration gate, not an implementation detail to hide in the dispatcher.
+This is intentionally incomplete. It prevents the current asynchronous Java boundary from pretending that event submission equals transport consumption or connection completion.
 
 ## 8. Write-interest rule
 
@@ -148,7 +154,7 @@ Error, peer half-close, and full close must be represented separately until the 
 
 The native layer must not emit duplicate terminal callbacks merely because multiple epoll flags are present on one notification.
 
-The final exactly-once close propagation rule is deferred until native-handle lifetime is connected to the Java wrapper lifetime.
+At the current asynchronous boundary, native code does not infer final connection destruction from the event callback's return. Final close/recycle ownership is deferred to the transport/Tomcat integration layer, except when Java event dispatch itself fails.
 
 ## 12. NGINX cross-check
 
@@ -161,9 +167,9 @@ This supports the NativeTomcat separation of readiness detection, native event h
 Before the next transport integration step:
 
 1. implement the actual native transport-consumption path;
-2. define how completion requests the next interest set from the native event-loop owner;
+2. define how completion requests the next interest set or close from the native event-loop owner;
 3. map native handles to a stable Java transport object and lifetime;
 4. connect the object to the real Tomcat `processSocket()` / `SocketProcessor` path;
-5. test event coalescing, serialization, partial I/O, close/error, and exactly-once rearm behavior.
+5. test event coalescing, serialization, partial I/O, close/error, and exactly-once rearm/close behavior.
 
 Only then should `Http11Processor` become an integration target.
