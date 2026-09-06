@@ -20,7 +20,7 @@
 	<!--
 		The upstream Tomcat Ant build remains the authoritative build for
 		Tomcat itself. This top-level file provides NativeTomcat's minimal
-		Java smoke-build target and an explicit delegation gate to the pinned
+		Java smoke-build target and explicit delegation gates to the pinned
 		upstream Tomcat build. It must not replace upstream build.xml.
 	-->
 	<property name="java.home" value="${java.home}" />
@@ -65,6 +65,10 @@
 
 	<target name="tomcat-compile" depends="verify-tomcat-source" description="Run the pinned upstream Tomcat compile target through its own Ant build">
 		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="compile" inheritAll="false" inheritRefs="false" />
+	</target>
+
+	<target name="tomcat-deploy" depends="verify-tomcat-source" description="Run the pinned upstream Tomcat deploy target to build a working Tomcat instance">
+		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="deploy" inheritAll="false" inheritRefs="false" />
 	</target>
 
 	<target name="clean">
