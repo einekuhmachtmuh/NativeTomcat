@@ -77,21 +77,21 @@ The ownership rule is:
 kernel readiness
     -> native event-loop callback
     -> work is dispatched/consumed
-    -> next interest set is determined
-    -> native event-loop owner rearms exactly once
+    -> next interest/close state is determined
+    -> native event-loop owner performs exactly one action
 ```
 
-The current `native/src/main.c` deliberately stops before the rearm step when it dispatches asynchronously to Java. It no longer rearms merely because `nt_jvm_dispatch_event()` returned successfully.
+The current `native/src/main.c` deliberately stops before the rearm/close decision when it dispatches asynchronously to Java. It no longer treats successful JNI dispatch as consumption, and it does not immediately close a terminal event after queuing it.
 
 Therefore the current state is safe but intentionally incomplete:
 
 ```text
-epoll event -> JNI enqueue -> no rearm
+epoll event -> JNI enqueue -> no rearm / no final close
 ```
 
-A connection remains one-shot disabled until the real transport/Tomcat consumer exists. This prevents the event loop from generating repeated readiness notifications faster than Java can consume the connection.
+A connection remains runtime-owned and one-shot disabled until the real transport/Tomcat consumer exists. This prevents the event loop from generating repeated readiness notifications faster than Java can consume the connection and prevents queued Java work from referring to a connection already destroyed by the callback.
 
-`Java task submitted` must not be treated as `transport consumed`.
+`Java task submitted` must not be treated as `transport consumed` or `connection completed`.
 
 ## 7. JNI boundary
 
@@ -140,13 +140,14 @@ Once Java transport references are introduced, this sequence must be extended so
 
 ### Tested
 
-The native runtime test currently verifies the implemented runtime behavior. The JNI dispatch test verifies the JNI event-dispatch path.
+The native runtime test currently verifies the synchronous native event-processing path, including explicit rearm after actual native consumption. The JNI dispatch test verifies the JNI event-dispatch path.
 
 ### Not yet verified end-to-end
 
 - Java-triggered native read/write operations;
 - rearm after actual Tomcat transport consumption;
 - native handle to `SocketWrapperBase` lifetime mapping;
+- terminal close/error propagation through Tomcat;
 - connector shutdown with live native connections;
 - race-free destruction with queued Java tasks;
 - HTTP request/response through the native transport.
@@ -158,7 +159,8 @@ The native runtime test currently verifies the implemented runtime behavior. The
 - TLS ownership;
 - sendfile and vectored I/O;
 - final JNI/global-reference destruction protocol;
-- cross-thread rearm/interest-change marshalling from Java to the native event-loop owner.
+- cross-thread rearm/interest-change marshalling from Java to the native event-loop owner;
+- final terminal-event-to-close mapping.
 
 ## 10. Contract boundary
 
