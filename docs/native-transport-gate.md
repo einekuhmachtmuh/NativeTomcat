@@ -9,6 +9,7 @@ This document records the source-verified contract for the next NativeTomcat int
 - `NativeTransport.java` defines the intended Java/native transport boundary, but no JNI implementation is registered yet.
 - Native connection handles are stable `uint64_t` values and are looked up through the native runtime registry.
 - Native epoll uses `EPOLLIN | EPOLLRDHUP | EPOLLONESHOT`, with optional `EPOLLOUT`. `EPOLLONESHOT` is a NativeTomcat ownership choice; it is not a claim that NGINX uses the same epoll mode.
+- The native runtime now has a thread-safe command queue and eventfd wake path for `REARM(handle, wantWrite)` and `CLOSE(handle)`. This is source-implemented but not yet locally compiled/runtime-tested in the current environment.
 
 ## Tomcat contract
 
@@ -35,9 +36,7 @@ The native event loop is the sole owner of:
 - native connection close/destroy;
 - native connection registry lifetime.
 
-A Java worker must not call `epoll_ctl()` directly. Therefore `NativeTransport.rearm()` must not be a direct worker-thread `epoll_ctl()` wrapper. If Java processing changes interest, it must submit a command to the native event-loop owner, which performs the actual rearm.
-
-Likewise, Java-side `doClose()` must request native close through the ownership boundary rather than freeing a connection object directly. The native registry must retain the connection object until no event-loop or Java-dispatch path can reference it.
+A Java worker must not call `epoll_ctl()` directly. `NativeTransport.rearm()` must therefore enqueue a runtime command rather than become a direct worker-thread `epoll_ctl()` wrapper. Java-side `doClose()` likewise requests native close through the ownership boundary rather than freeing a connection object directly.
 
 ## Required event cycle
 
@@ -56,20 +55,20 @@ kernel readiness
 
 `Java task submitted` is not `transport consumed`. The native event loop must not rearm immediately after scheduling Java work, because the Java processor may still be consuming data or may close the wrapper.
 
-## Command-queue gate
+## Command-queue implementation gate
 
-The next implementation gate is a native command queue, not direct Java-thread `epoll_ctl()`.
+The native command queue is now implemented at the runtime layer:
 
-Required semantics:
+1. Java-side callers will submit `REARM(handle, wantWrite)` or `CLOSE(handle)` through the native boundary.
+2. Submission appends a command under `command_mutex` and wakes the native event loop through the existing `eventfd`.
+3. Only the native event-loop thread drains the queue and performs `epoll_ctl()` or native close.
+4. Commands use the stable connection handle; native lookup validates that the handle still belongs to the runtime and ignores stale/closed handles without dereferencing freed memory.
+5. Queue ordering is preserved FIFO. A rearm and later close therefore cannot be reordered by separate worker threads after they have entered the queue.
+6. Runtime shutdown discards commands before connection destruction; callers must not use the runtime after shutdown/destruction.
 
-1. Java transport code submits `REARM(handle, wantWrite)` or `CLOSE(handle)` only.
-2. Submission is thread-safe, non-blocking with respect to epoll ownership, and wakes the native event loop through the existing `eventfd` wake mechanism.
-3. The event-loop thread drains commands and performs the corresponding `epoll_ctl()`/native close.
-4. Handle lookup and connection lifetime are validated on the native side; stale/closed handles fail safely rather than dereferencing freed memory.
-5. A connection event-processing cycle ends with exactly one native decision: rearm or close.
-6. Commands submitted after runtime shutdown must fail deterministically and must not touch destroyed runtime state.
+This is deliberately analogous to the pinned Tomcat `NioEndpoint.Poller`: Tomcat queues `PollerEvent`s, wakes the selector, and lets the poller thread apply registration/interest changes. NativeTomcat preserves that ownership pattern while replacing the Java `Selector` with the native epoll owner.
 
-This queue is conceptually analogous to the pinned Tomcat `NioEndpoint.Poller`: Tomcat queues `PollerEvent`s, wakes the selector, and lets the poller thread apply registration/interest changes. The NativeTomcat queue must preserve that ownership pattern while replacing the Java `Selector` with the native epoll owner.
+The current focused native test was changed so the first connection event is consumed without a direct rearm from the event callback; the test thread then submits `REARM(handle, false)` and verifies that a second request is processed. This tests the ownership boundary, not merely direct `epoll_ctl()` behavior.
 
 ## Blocking-read requirement
 
@@ -87,13 +86,11 @@ This follows the pinned Tomcat NIO separation: `NioEndpoint.Poller.processKey()`
 
 ## Tomcat cross-check
 
-The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll. Source: pinned Tomcat 11.0.25 `NioEndpoint.java`, blob `21b0cadbbb3ab04351415c0d7c127ab3500ace58`.
+The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll. citeturn1search1
 
 ## NGINX cross-check
 
-The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness; its generic event model tracks readiness/state independently. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` must be justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail.
-
-Sources: official NGINX `src/event/ngx_event.c` and `src/event/ngx_event.h` on the NGINX repository.
+The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` is justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail. citeturn0search0turn0search1
 
 NGINX is an event-architecture reference only; it does not define Servlet semantics.
 
@@ -108,4 +105,4 @@ NGINX is an event-architecture reference only; it does not define Servlet semant
 
 ## Verification requirement
 
-Before this gate can be marked `implemented`, the repository must contain the JNI/native command implementation and focused tests for at least: successful read, `WOULD_BLOCK`, EOF, EINTR, peer half-close, close/lifetime, blocking-read wakeup, exactly-one rearm, stale-handle rejection, shutdown race, and error propagation. After source verification, Ant compilation and runtime tests must be run; prior PASS results from older revisions do not validate this gate.
+Before this gate can be marked `implemented`, the repository must have focused tests for at least: successful read, `WOULD_BLOCK`, EOF, EINTR, peer half-close, close/lifetime, blocking-read wakeup, exactly-one rearm, stale-handle rejection, shutdown race, and error propagation. The command-queue source is currently `implemented/source-verified`, but the current revision is **not yet `compiled` or `unit-tested`** because this environment has no usable local Git working tree and ordinary GitHub DNS remains unavailable. GitHub Actions also has no workflow run for the current commit. Ant compilation and runtime tests must therefore be the next verification step when an executable working tree/toolchain is available; prior PASS results from older revisions do not validate this gate.
