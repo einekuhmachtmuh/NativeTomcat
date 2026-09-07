@@ -424,7 +424,8 @@ nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t hand
 	nt_connection_t *result = NULL;
 	for (size_t i = 0; i < runtime->connection_count; ++i) {
 		nt_connection_t *connection = runtime->connections[i];
-		if (nt_connection_get_handle(connection) == handle) {
+		if (nt_connection_get_handle(connection) == handle &&
+				nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE) {
 			result = connection;
 			break;
 		}
@@ -506,7 +507,7 @@ int nt_runtime_run(nt_runtime_t *runtime)
 
 			uint64_t handle = events[i].data.u64;
 			nt_connection_t *connection = nt_runtime_find_connection(runtime, handle);
-			if (connection == NULL || nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
+			if (connection == NULL) {
 				continue;
 			}
 
