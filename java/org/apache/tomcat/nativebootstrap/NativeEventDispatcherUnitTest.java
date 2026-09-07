@@ -4,9 +4,10 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Regression test for per-connection serialization and event coalescing. */
+/** Regression tests for per-connection serialization, coalescing and shutdown draining. */
 public final class NativeEventDispatcherUnitTest {
 
 	private NativeEventDispatcherUnitTest() {
@@ -49,6 +50,43 @@ public final class NativeEventDispatcherUnitTest {
 		if (calls.get() >= 100) {
 			throw new AssertionError("events were not coalesced: calls=" + calls.get());
 		}
+
+		ExecutorService drainExecutor = Executors.newSingleThreadExecutor();
+		CountDownLatch started = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		AtomicBoolean stopReturned = new AtomicBoolean();
+		NativeEventDispatcher drainDispatcher = new NativeEventDispatcher(drainExecutor, (handle, events) -> {
+			started.countDown();
+			try {
+				release.await(5, TimeUnit.SECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		drainDispatcher.dispatch(9, 1);
+		if (!started.await(5, TimeUnit.SECONDS)) {
+			throw new AssertionError("drain test did not start");
+		}
+
+		Thread stopper = new Thread(() -> {
+			drainDispatcher.stop();
+			stopReturned.set(true);
+		}, "native-event-dispatcher-stop-test");
+		stopper.start();
+		Thread.sleep(50);
+		if (stopReturned.get()) {
+			throw new AssertionError("dispatcher stop returned before active task drained");
+		}
+		release.countDown();
+		stopper.join(5000);
+		if (!stopReturned.get()) {
+			throw new AssertionError("dispatcher stop did not return after task drain");
+		}
+		drainExecutor.shutdown();
+		if (!drainExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+			throw new AssertionError("drain executor did not terminate");
+		}
+
 		System.out.println("NativeEventDispatcherUnitTest: PASS calls=" + calls.get());
 	}
 }
