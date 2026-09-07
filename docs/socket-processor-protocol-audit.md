@@ -48,8 +48,16 @@ native readiness -> NativeSocketWrapper -> processSocket -> SocketProcessorBase
 
 目前 `NativeSocketWrapper` 在 blocking read/write 的 WOULD_BLOCK 情況及 `registerReadInterest()`/`registerWriteInterest()` 時提交 native rearm，`doClose()` 提交 native close；native event-loop 是 `epoll_ctl()` owner。然而 `NativeEndpoint.SocketProcessor.doRun()` 在 handler 回傳 `OPEN`、`LONG`、async 或 keep-alive 時沒有一個已驗證的、明確的 completion-to-rearm decision。不得把 command queue 的 coalescing 當成 HTTP event cycle 已經「exactly one rearm/close」的證據。
 
-下一步必須先以真實 NativeHttp11Protocol/ConnectionHandler、loopback socket 與 native runtime 建立 integration test，量測每個完成的 processor cycle 所提交及實際執行的 rearm/close；在該測試前，不得進入 Servlet/Catalina/TCK 或效能宣稱。
+### 新增 source-level finding：command queue coalescing 仍不足以保證 exactly-one
+
+Native runtime 的 command queue 會在 `nt_runtime_process_commands()` 內對同一 handle 的 REARM/CLOSE 做邏輯 coalescing，最後才呼叫 `nt_runtime_rearm_connection()` 或 close。這能消除同一批已被 `nt_runtime_take_commands()` 取出的多個 command，但不能單獨證明一個 native readiness cycle 只會產生一次有效 `epoll_ctl()`。
+
+原因是 native event loop 在收到 readiness 後會呼叫 `nt_jvm_dispatch_event()`，而 Java 端 `NativeEventDispatcher` 只是把工作 hand-off 給 Tomcat executor；native event loop 並不等待 `SocketProcessor` 完成。若同一 processor cycle 的 Java worker 先後提交兩個 rearm command，native event loop 可能在兩個 command 之間已經醒來並取走第一批 command，之後第二個 command 會形成另一批 wake/command processing。故目前實作對「每個 native readiness cycle 恰好一次有效 rearm/close」仍只有設計意圖，沒有 source-level guarantee 或 runtime measurement。
+
+這不是要求把 Java processing 改成阻塞 native event loop；正確下一步是先定義並核驗一個明確的 event-cycle completion/interest ownership contract，使 native event-loop owner 能在 Java transport consumption 完成後決定單一最終 interest state，同時不能破壞 Tomcat blocking read/write waiter 的立即 rearm 語意。任何修改前都必須再次對照 pinned `NioEndpoint.Poller.processKey()`、`AbstractProtocol.ConnectionHandler` 與 `SocketWrapperBase.register*Interest()`。
 
 ## NGINX 1.30.4 交叉核對
 
 官方 NGINX `src/event/ngx_event.c` 的 `ngx_handle_read_event()` 與 `ngx_handle_write_event()` 將 readiness handler 與 event registration 分開；`src/event/modules/ngx_epoll_module.c` 使用 read `EPOLLIN | EPOLLRDHUP`、write `EPOLLOUT`，並以 `EPOLLET` 作為目前 clear-event backend 模式。這支持 NativeTomcat 將 readiness、transport consumption 與 interest management 分層，但不定義 Tomcat/Servlet 語意，亦不表示 NGINX 以 `EPOLLONESHOT` 實作 NativeTomcat 的 ownership model。
+
+NGINX epoll backend 也顯示另一個重要對照：同一 `epoll_wait()` 回傳的 connection event 會在同一 event-loop iteration 中先處理 `EPOLLIN`，再處理 `EPOLLOUT`；read/write handler 的 interest 操作則由 event abstraction 層維護，而不是讓每個 HTTP handler 直接擁有 epoll fd。NativeTomcat 因此應維持「Java/Tomcat 決定 transport 所需的 interest、native event-loop owner 最終套用 interest」的分層；NGINX 的 ET 模式不能直接當成 NativeTomcat 的 ONESHOT 實作依據。
