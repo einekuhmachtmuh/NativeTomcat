@@ -83,13 +83,6 @@ static void test_connection_handler(nt_runtime_t *runtime, nt_connection_t *conn
 			}
 		}
 	}
-
-	if (nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE &&
-			nt_runtime_rearm_connection(runtime, connection, false) != 0) {
-		atomic_store(&context->callback_error, true);
-		nt_connection_close(connection);
-		nt_runtime_stop(runtime);
-	}
 }
 
 static void *runtime_thread(void *arg) {
@@ -160,9 +153,12 @@ int main(void) {
 	assert(client >= 0);
 
 	send_and_expect_echo(client, "first");
+	uint64_t handle = atomic_load(&context.first_handle);
+	assert(handle != 0);
+	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
+
 	send_and_expect_echo(client, "second");
 	assert(atomic_load(&context.readable_events) >= 2);
-	assert(atomic_load(&context.first_handle) != 0);
 
 	shutdown(client, SHUT_WR);
 	assert(pthread_join(thread, NULL) == 0);
