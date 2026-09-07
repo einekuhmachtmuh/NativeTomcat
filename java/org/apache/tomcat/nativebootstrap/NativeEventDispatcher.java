@@ -59,17 +59,7 @@ public final class NativeEventDispatcher {
         }
 
         if (submit) {
-            try {
-                executor.execute(() -> run(connectionHandle, state));
-            } catch (RuntimeException e) {
-                synchronized (lifecycleMonitor) {
-                    state.scheduled.set(false);
-                    pending.remove(connectionHandle, state);
-                    activeTasks--;
-                    lifecycleMonitor.notifyAll();
-                }
-                throw e;
-            }
+            submit(connectionHandle, state);
         }
     }
 
@@ -95,6 +85,20 @@ public final class NativeEventDispatcher {
         }
     }
 
+    private void submit(long connectionHandle, PendingEvent state) {
+        try {
+            executor.execute(() -> run(connectionHandle, state));
+        } catch (RuntimeException e) {
+            synchronized (lifecycleMonitor) {
+                state.scheduled.set(false);
+                pending.remove(connectionHandle, state);
+                activeTasks--;
+                lifecycleMonitor.notifyAll();
+            }
+            throw e;
+        }
+    }
+
     private void run(long connectionHandle, PendingEvent state) {
         try {
             for (;;) {
@@ -105,15 +109,18 @@ public final class NativeEventDispatcher {
                 processor.process(connectionHandle, events);
             }
         } finally {
+            boolean resubmit;
             synchronized (lifecycleMonitor) {
-                state.scheduled.set(false);
-                if (state.events.get() != 0 && accepting) {
-                    state.scheduled.set(true);
-                    return;
+                resubmit = state.events.get() != 0 && accepting;
+                if (!resubmit) {
+                    state.scheduled.set(false);
+                    pending.remove(connectionHandle, state);
+                    activeTasks--;
+                    lifecycleMonitor.notifyAll();
                 }
-                pending.remove(connectionHandle, state);
-                activeTasks--;
-                lifecycleMonitor.notifyAll();
+            }
+            if (resubmit) {
+                submit(connectionHandle, state);
             }
         }
     }
