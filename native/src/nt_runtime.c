@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -27,6 +28,7 @@ struct nt_runtime {
 	nt_connection_t **connections;
 	size_t connection_count;
 	size_t connection_capacity;
+	pthread_mutex_t connection_mutex;
 	int listener_token;
 	int wake_token;
 };
@@ -71,31 +73,45 @@ static int nt_create_listener(const nt_runtime_config_t *config) {
 }
 
 static int nt_runtime_add_connection(nt_runtime_t *runtime, nt_connection_t *connection) {
+	if (pthread_mutex_lock(&runtime->connection_mutex) != 0) {
+		errno = EBUSY;
+		return -1;
+	}
+
+	int status = 0;
 	if (runtime->connection_count == runtime->connection_capacity) {
 		size_t new_capacity = runtime->connection_capacity == 0 ? 64 : runtime->connection_capacity * 2;
 		if (new_capacity < runtime->connection_capacity ||
 				new_capacity > SIZE_MAX / sizeof(*runtime->connections)) {
 			errno = EOVERFLOW;
-			return -1;
+			status = -1;
+		} else {
+			nt_connection_t **connections = realloc(
+					runtime->connections, new_capacity * sizeof(*runtime->connections));
+			if (connections == NULL) {
+				status = -1;
+			} else {
+				runtime->connections = connections;
+				runtime->connection_capacity = new_capacity;
+			}
 		}
-
-		nt_connection_t **connections = realloc(
-				runtime->connections, new_capacity * sizeof(*runtime->connections));
-		if (connections == NULL) {
-			return -1;
-		}
-		runtime->connections = connections;
-		runtime->connection_capacity = new_capacity;
 	}
 
-	runtime->connections[runtime->connection_count++] = connection;
-	return 0;
+	if (status == 0) {
+		runtime->connections[runtime->connection_count++] = connection;
+	}
+	pthread_mutex_unlock(&runtime->connection_mutex);
+	return status;
 }
 
 static void nt_runtime_close_connections(nt_runtime_t *runtime) {
+	if (pthread_mutex_lock(&runtime->connection_mutex) != 0) {
+		return;
+	}
 	for (size_t i = 0; i < runtime->connection_count; ++i) {
 		nt_connection_close(runtime->connections[i]);
 	}
+	pthread_mutex_unlock(&runtime->connection_mutex);
 }
 
 static void nt_runtime_destroy_connections(nt_runtime_t *runtime) {
@@ -163,8 +179,14 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->connection_handler_data = config->connection_handler_data;
 	atomic_init(&value->stop_requested, false);
 
+	if (pthread_mutex_init(&value->connection_mutex, NULL) != 0) {
+		free(value);
+		return -1;
+	}
+
 	value->listener_fd = nt_create_listener(config);
 	if (value->listener_fd == -1) {
+		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
 	}
@@ -172,6 +194,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (value->epoll_fd == -1) {
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
 	}
@@ -180,6 +203,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	if (value->wake_fd == -1) {
 		close(value->epoll_fd);
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
 	}
@@ -192,6 +216,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		close(value->wake_fd);
 		close(value->epoll_fd);
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
 	}
@@ -201,6 +226,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		close(value->wake_fd);
 		close(value->epoll_fd);
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
 	}
@@ -230,15 +256,25 @@ nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t hand
 		return NULL;
 	}
 
+	if (pthread_mutex_lock(&runtime->connection_mutex) != 0) {
+		errno = EBUSY;
+		return NULL;
+	}
+
+	nt_connection_t *result = NULL;
 	for (size_t i = 0; i < runtime->connection_count; ++i) {
 		nt_connection_t *connection = runtime->connections[i];
 		if (nt_connection_get_handle(connection) == handle) {
-			return connection;
+			result = connection;
+			break;
 		}
 	}
+	pthread_mutex_unlock(&runtime->connection_mutex);
 
-	errno = ENOENT;
-	return NULL;
+	if (result == NULL) {
+		errno = ENOENT;
+	}
+	return result;
 }
 
 int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write) {
@@ -317,7 +353,7 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 
 			if (runtime->connection_handler != NULL && connection_events != 0) {
 				runtime->connection_handler(runtime, connection, connection_events,
-						runtime->connection_handler_data);
+					runtime->connection_handler_data);
 			}
 		}
 	}
@@ -353,5 +389,6 @@ void nt_runtime_destroy(nt_runtime_t *runtime) {
 	if (runtime->listener_fd != -1) {
 		close(runtime->listener_fd);
 	}
+	pthread_mutex_destroy(&runtime->connection_mutex);
 	free(runtime);
 }
