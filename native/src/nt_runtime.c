@@ -224,6 +224,23 @@ int nt_runtime_get_port(const nt_runtime_t *runtime) {
 	return (int) ntohs(address.sin_port);
 }
 
+nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t handle) {
+	if (runtime == NULL || handle == 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	for (size_t i = 0; i < runtime->connection_count; ++i) {
+		nt_connection_t *connection = runtime->connections[i];
+		if (nt_connection_get_handle(connection) == handle) {
+			return connection;
+		}
+	}
+
+	errno = ENOENT;
+	return NULL;
+}
+
 int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write) {
 	if (runtime == NULL || connection == NULL || nt_connection_get_runtime(connection) != runtime) {
 		errno = EINVAL;
