@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #ifdef __cplusplus
@@ -26,6 +27,7 @@ typedef enum nt_connection_io_result {
 } nt_connection_io_result_t;
 
 int nt_connection_create(nt_connection_t **connection, nt_runtime_t *runtime, int fd);
+uint64_t nt_connection_get_handle(const nt_connection_t *connection);
 int nt_connection_get_fd(const nt_connection_t *connection);
 nt_runtime_t *nt_connection_get_runtime(const nt_connection_t *connection);
 nt_connection_state_t nt_connection_get_state(const nt_connection_t *connection);
