@@ -34,6 +34,8 @@ typedef struct nt_runtime_config {
 int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config);
 int nt_runtime_get_port(const nt_runtime_t *runtime);
 nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t handle);
+int nt_runtime_request_rearm(nt_runtime_t *runtime, uint64_t handle, bool want_write);
+int nt_runtime_request_close(nt_runtime_t *runtime, uint64_t handle);
 int nt_runtime_run(nt_runtime_t *runtime);
 void nt_runtime_stop(nt_runtime_t *runtime);
 int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write);
