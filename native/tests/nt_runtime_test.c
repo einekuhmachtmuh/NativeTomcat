@@ -16,7 +16,6 @@ struct test_context {
 	atomic_int peer_eof_events;
 	atomic_bool callback_error;
 	atomic_uint_fast64_t first_handle;
-	atomic_bool close_requested;
 };
 
 static void test_connection_handler(nt_runtime_t *runtime, nt_connection_t *connection,
@@ -142,7 +141,6 @@ int main(void) {
 	atomic_init(&context.peer_eof_events, 0);
 	atomic_init(&context.callback_error, false);
 	atomic_init(&context.first_handle, 0);
-	atomic_init(&context.close_requested, false);
 
 	nt_runtime_t *runtime = NULL;
 	nt_runtime_config_t config = {
@@ -172,12 +170,20 @@ int main(void) {
 	send_and_expect_echo(client, "second");
 	assert(atomic_load(&context.readable_events) >= 2);
 
+	/* Multiple rearm requests for one handle must collapse to the final state,
+	 * and a later close must dominate every rearm in the same queue batch. */
+	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, true) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
 	assert(nt_runtime_request_close(runtime, handle) == 0);
+
 	nt_connection_t *connection = nt_runtime_find_connection(runtime, handle);
 	assert(connection != NULL);
 	wait_for_closed(connection);
 	assert(nt_runtime_find_connection(runtime, handle) == NULL);
-	errno = 0;
+
+	/* A command targeting a closed handle may be submitted asynchronously but
+	 * must be harmless when the event loop resolves the handle. */
 	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
 	assert(nt_runtime_request_close(runtime, handle) == 0);
 
