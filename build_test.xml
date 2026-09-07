@@ -30,6 +30,7 @@
         <available file="${basedir}/java/org/apache/tomcat/util/net/SocketWrapperBase.java" property="socket-wrapper.present"/>
         <available file="${basedir}/java/org/apache/tomcat/util/net/NativeSocketWrapper.java" property="native-socket-wrapper.present"/>
         <available file="${basedir}/java/org/apache/tomcat/util/net/NativeEndpoint.java" property="native-endpoint.present"/>
+        <available file="${basedir}/java/org/apache/coyote/http11/NativeHttp11Protocol.java" property="native-http11-protocol.present"/>
         <available file="${basedir}/java/org/apache/tomcat/util/net/SocketProcessorBase.java" property="socket-processor.present"/>
         <fail unless="server.present" message="Missing copied Tomcat source: org/apache/catalina/Server.java"/>
         <fail unless="service.present" message="Missing copied Tomcat source: org/apache/catalina/Service.java"/>
@@ -37,32 +38,35 @@
         <fail unless="socket-wrapper.present" message="Missing SocketWrapperBase surface: org/apache/tomcat/util/net/SocketWrapperBase.java"/>
         <fail unless="native-socket-wrapper.present" message="Missing concrete SocketWrapperBase surface: org/apache/tomcat/util/net/NativeSocketWrapper.java"/>
         <fail unless="native-endpoint.present" message="Missing NativeEndpoint integration boundary: org/apache/tomcat/util/net/NativeEndpoint.java"/>
+        <fail unless="native-http11-protocol.present" message="Missing native HTTP/1.1 protocol boundary: org/apache/coyote/http11/NativeHttp11Protocol.java"/>
         <fail unless="socket-processor.present" message="Missing SocketProcessorBase surface: org/apache/tomcat/util/net/SocketProcessorBase.java"/>
     </target>
 
     <target name="java-compile" depends="verify-tomcat-source-slice,verify-bnd-dependency">
         <javac srcdir="${basedir}/java" destdir="${java.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
             <classpath><pathelement location="${bnd.jar}"/></classpath>
-            <include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java"/>
-            <include name="org/apache/tomcat/nativebootstrap/NativeTomcatBootstrap.java"/>
+            <include name="org/apache/tomcat/nativebootstrap/*.java"/>
+            <include name="org/apache/coyote/**/*.java"/>
             <include name="org/apache/tomcat/util/buf/*.java"/>
             <include name="org/apache/juli/logging/*.java"/>
             <include name="org/apache/tomcat/util/res/*.java"/>
             <include name="org/apache/tomcat/util/net/**/*.java"/>
             <include name="org/apache/tomcat/util/net/NativeEndpoint.java"/>
+            <include name="org/apache/coyote/http11/NativeHttp11Protocol.java"/>
         </javac>
     </target>
 
     <target name="java-unit-test" depends="java-compile">
         <javac srcdir="${basedir}/java" destdir="${java.test.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
             <classpath><pathelement location="${bnd.jar}"/></classpath>
-            <include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java"/>
-            <include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherUnitTest.java"/>
+            <include name="org/apache/tomcat/nativebootstrap/*.java"/>
+            <include name="org/apache/coyote/**/*.java"/>
             <include name="org/apache/tomcat/util/buf/*.java"/>
             <include name="org/apache/juli/logging/*.java"/>
             <include name="org/apache/tomcat/util/res/*.java"/>
             <include name="org/apache/tomcat/util/net/**/*.java"/>
             <include name="org/apache/tomcat/util/net/NativeEndpoint.java"/>
+            <include name="org/apache/coyote/http11/NativeHttp11Protocol.java"/>
         </javac>
         <java classname="org.apache.tomcat.nativebootstrap.NativeEventDispatcherUnitTest" fork="true" failonerror="true"><classpath><pathelement location="${java.test.classes}"/></classpath></java>
     </target>
@@ -90,8 +94,7 @@
 
     <target name="native-jvm-dispatch-test" depends="init">
         <javac srcdir="${basedir}/java" destdir="${java.test.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
-            <include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java"/>
-            <include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherTest.java"/>
+            <include name="org/apache/tomcat/nativebootstrap/*.java"/>
         </javac>
         <exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
             <arg value="-std=gnu11"/><arg value="-D_GNU_SOURCE"/><arg value="-Wall"/><arg value="-Wextra"/><arg value="-Wpedantic"/><arg value="-Werror"/><arg value="-I${basedir}/native/include"/><arg value="-I${java.home}/include"/><arg value="-I${java.home}/include/linux"/><arg value="-pthread"/><arg value="-o"/><arg value="${native.build.dir}/nt_jvm_dispatch_test"/>
