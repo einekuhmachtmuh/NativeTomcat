@@ -82,13 +82,13 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
 
     private SocketEvent toSocketEvent(int events) {
         // NativeTomcat's current event mask uses bit 0 for readable and bit 1
-        // for writable. Peer-read-closed and error are terminal conditions and
-        // are deliberately mapped to Tomcat ERROR until native close semantics
-        // are integrated in the next lifecycle gate.
-        if ((events & 0x4) != 0 || (events & 0x8) != 0) {
+        // for writable. EPOLLRDHUP is represented by PEER_READ_CLOSED (bit 2).
+        // As in the NGINX event layer, a peer half-close is still a read-side
+        // notification so that the transport layer can observe EOF cleanly.
+        if ((events & 0x8) != 0) {
             return SocketEvent.ERROR;
         }
-        if ((events & 0x1) != 0) {
+        if ((events & 0x1) != 0 || (events & 0x4) != 0) {
             return SocketEvent.OPEN_READ;
         }
         if ((events & 0x2) != 0) {
