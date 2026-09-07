@@ -165,16 +165,16 @@ int main(void) {
 	send_and_expect_echo(client, "first");
 	uint64_t handle = atomic_load(&context.first_handle);
 	assert(handle != 0);
-	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, NT_RUNTIME_INTEREST_READ) == 0);
 
 	send_and_expect_echo(client, "second");
 	assert(atomic_load(&context.readable_events) >= 2);
 
 	/* Multiple rearm requests for one handle must collapse to the final state,
 	 * and a later close must dominate every rearm in the same queue batch. */
-	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
-	assert(nt_runtime_request_rearm(runtime, handle, true) == 0);
-	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, NT_RUNTIME_INTEREST_READ) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, NT_RUNTIME_INTEREST_WRITE) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, NT_RUNTIME_INTEREST_READ) == 0);
 	assert(nt_runtime_request_close(runtime, handle) == 0);
 
 	nt_connection_t *connection = nt_runtime_find_connection(runtime, handle);
@@ -184,7 +184,7 @@ int main(void) {
 
 	/* A command targeting a closed handle may be submitted asynchronously but
 	 * must be harmless when the event loop resolves the handle. */
-	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
+	assert(nt_runtime_request_rearm(runtime, handle, NT_RUNTIME_INTEREST_READ) == 0);
 	assert(nt_runtime_request_close(runtime, handle) == 0);
 
 	nt_runtime_stop(runtime);
@@ -193,7 +193,7 @@ int main(void) {
 	assert(atomic_load(&context.peer_eof_events) == 0);
 
 	errno = 0;
-	assert(nt_runtime_request_rearm(runtime, handle, false) == -1);
+	assert(nt_runtime_request_rearm(runtime, handle, NT_RUNTIME_INTEREST_READ) == -1);
 	assert(errno == ECANCELED);
 	errno = 0;
 	assert(nt_runtime_request_close(runtime, handle) == -1);
