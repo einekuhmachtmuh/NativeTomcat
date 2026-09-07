@@ -7,63 +7,75 @@ Reference file:
 
 Pinned upstream blob SHA: `98785b8974054dcf89ca39ef9bcdb2d787b3819d`
 
+Repository blob SHA: `eba0ae1c99703b15b1e9975a03d48f8268a9cd7b`
+
 ## Result
 
-The current `java/org/apache/tomcat/util/net/SocketWrapperBase.java` remains a compatibility shell. It must **not** be described as the upstream implementation. The exact pinned source was successfully retrieved and independently verified by its upstream blob SHA, but the current repository could not yet receive the complete file through the available repository write path. The attempted one-shot GitHub Actions migration was removed because repository Actions reported no workflow runs; it is not treated as a successful migration.
+The repository `java/org/apache/tomcat/util/net/SocketWrapperBase.java` has now been fetched as its complete repository blob and compared against the complete pinned upstream blob. The repository copy is **format-normalized pinned source**: the source text is semantically identical to the pinned Tomcat 11.0.25 source, with only formatting changes introduced by the manual migration (notably tabs and brace placement) and the corresponding license URL indentation.
 
-The pinned upstream source materially differs from the shell in state, synchronization, buffering, asynchronous I/O, executor dispatch, error handling, close/recycle behavior, Servlet connection handling, and the concrete abstract-method contract.
+The raw Git blob SHA therefore correctly differs from the pinned upstream SHA. This is expected and must not be reported as an exact blob-SHA match. The relevant result is that the complete implementation, fields, methods, nested types, abstract contract and method bodies were checked against the pinned source and no semantic/source-content discrepancy was identified.
 
-Verified upstream dependencies visible directly in the pinned source include:
+This closes the previous `SocketWrapperBase` source-migration block. It is now appropriate to proceed to the next gate: recursively verify that every supporting class required by the real wrapper is present at its original package/path, source-verified, and included in the formal build/verification paths.
 
-- `AbstractEndpoint`
-- `SocketBufferHandler`
-- `WriteBuffer`
-- `ApplicationBufferHandler`
-- `SendfileDataBase`
-- `SendfileState`
-- `SSLSupport`
-- `SocketEvent`
-- `org.apache.tomcat.util.ExceptionUtils`
-- `org.apache.tomcat.util.res.StringManager`
-- `org.apache.juli.logging.Log` / `LogFactory`
-- `jakarta.servlet.ServletConnection`
+## Verified upstream structure
 
-The upstream class also contains connection-ID generation, read/write timeout state, keep-alive state, cached local/remote metadata, SNI and negotiated-protocol state, error recording, non-blocking write buffering, asynchronous-operation semaphores/state, processor association, and vectored-I/O operation machinery. These are implementation dependencies, not merely API-surface decorations.
+The audit covered the complete class rather than only the public surface, including:
 
-## Supporting-source migrations completed in this gate
+- imports and superclass/generic contract;
+- connection ID generation and wrapper state;
+- endpoint reference and `ReentrantLock` ownership;
+- close/error/previous-I/O-error state;
+- read/write timeout state and keep-alive state;
+- local/remote address, host and port caches;
+- `ServletConnection`, SNI and negotiated-protocol state;
+- `SocketBufferHandler` and `WriteBuffer` integration;
+- asynchronous-operation semaphores and `OperationState`;
+- current-processor association;
+- executor dispatch and endpoint-running checks;
+- read-buffer population and `unRead()` semantics;
+- close lifecycle, handler release, connection counting and `doClose()`;
+- blocking and non-blocking byte-array/ByteBuffer writes;
+- blocking/non-blocking flush semantics;
+- `processSocket()` delegation;
+- read/write interest registration;
+- sendfile and SSL abstract contracts;
+- NIO2 blocking modes and completion states;
+- vectored I/O operation state and completion handling;
+- timeout, pending-operation and completion-handler behavior;
+- transfer/buffer utility methods;
+- `ServletConnection` creation.
 
-Two small supporting Tomcat sources required directly by the upstream wrapper have now been migrated exactly at their original paths and their repository blob SHA matches the pinned upstream SHA:
+No shell-only replacement remains in this class.
+
+## Supporting-source closure
+
+The following exact pinned Tomcat sources required by this wrapper are already present and source-verified at their original paths:
 
 | Source | Pinned blob SHA | Repository status |
 |---|---|---|
-| `org/apache/tomcat/util/ExceptionUtils.java` | `485c66c658b18653021f12053b37ab78f4358b8c` | exact source migrated and SHA-verified |
-| `org/apache/tomcat/util/res/StringManager.java` | `a904c586600ff54b47ac1550d36e2d23d0732b87` | exact source migrated and SHA-verified |
+| `org/apache/tomcat/util/net/SocketBufferHandler.java` | `fc6888b5326d9b0301b2e4d692eff1ea199d790f` | exact source + SHA verified |
+| `org/apache/tomcat/util/buf/ByteBufferUtils.java` | `196bc9b6b79477808f26279ea79447996db66707` | exact source + SHA verified |
+| `org/apache/tomcat/util/buf/ByteBufferUtilsUnsafe.java` | `1ce3db09321e06d08c534c37e54bd16e99fcc723` | exact source + SHA verified |
+| `org/apache/tomcat/util/ExceptionUtils.java` | `485c66c658b18653021f12053b37ab78f4358b8c` | exact source + SHA verified |
+| `org/apache/tomcat/util/res/StringManager.java` | `a904c586600ff54b47ac1550d36e2d23d0732b87` | exact source + SHA verified |
+| `org/apache/juli/logging/Log.java` | `11de9d593708410f4e43beb40a656ed293e54b97` | exact source + SHA verified |
+| `org/apache/juli/logging/LogFactory.java` | `1696c84ef800d11d5b3d81c20ddf17e5e0d94b6b` | exact source + SHA verified |
+| `org/apache/juli/logging/DirectJDKLog.java` | `70226d1b3c463b019f1a6d556df166bfeb7a3405` | exact source + SHA verified |
+| `org/apache/juli/logging/LogConfigurationException.java` | `9e296ed1ce4b1c78eb2839d90ae7b083711ca1f9` | exact source + SHA verified |
 
-`build.xml` was updated so these migrated source paths are explicitly included in the formal Java build slice. They are not being treated as invisible dependencies.
+`LogFactory.java` also has a real third-party bnd annotation dependency (`aQute.bnd.annotation.spi.ServiceConsumer`). This must be supplied as a real build dependency; it must not be replaced by a locally invented annotation or removed merely to make the source compile.
 
-The remaining `org.apache.juli.logging.*` classes and the rest of the Tomcat dependency closure have not been migrated merely to make the current shell compile. They must be migrated when required by the exact upstream wrapper and recursively audited under the same source rule.
+## Build-path gate
 
-## Shell-vs-upstream findings
+`build.xml` and `build_test.xml` have been updated so the migrated utility/buffer/JULI/net sources are explicit members of the formal Java compile and verification paths. Both build files also contain an explicit bnd dependency gate.
 
-The following current shell behaviors are deliberately temporary and are not acceptable as final Tomcat semantics:
+The bnd dependency is therefore a **build-environment prerequisite**, not a reason to alter the pinned Tomcat source.
 
-| Area | Current shell | Required direction |
-|---|---|---|
-| `hasDataToRead()` | Always returns `true` | Restore upstream buffering/read semantics |
-| `hasDataToWrite()` | Only checks the simplified local write buffer | Restore socket-buffer + non-blocking buffer semantics |
-| `isReadyForWrite()` | Directly delegates to simplified `canWrite()` | Restore upstream readiness/interest behavior |
-| `canWrite()` | Simplified closed/buffer check | Restore upstream write-state contract |
-| `flush(boolean)` | Delegates to `flushNonBlocking()` | Restore blocking/non-blocking distinction |
-| `unRead()` | Throws `UnsupportedOperationException` | Migrate required push-back semantics |
-| vectored I/O | Explicitly unsupported | Migrate upstream operation-state machinery before enabling it |
-| executor dispatch | Simplified endpoint delegation | Restore upstream endpoint/executor contract |
-| async operation state | Placeholder nested classes | Migrate the real state/handler implementation |
-| error handling | Simplified first-write-wins field | Compare and restore exact upstream semantics |
-| close/recycle | Simplified `AtomicBoolean` path | Compare exact upstream lifecycle and subclass hooks |
+The latest full compilation after these source/build changes has **not** been executed in this environment. Previous successful compile/test runs predate the latest source/build changes and must not be reused as current verification.
 
 ## Tomcat integration cross-check
 
-The pinned Tomcat transport path requires the wrapper to participate in the real endpoint dispatch contract rather than being called as an isolated facade. The required path remains:
+The pinned Tomcat transport path still requires the wrapper to participate in the real endpoint dispatch contract:
 
 ```text
 NioEndpoint.Poller
@@ -75,15 +87,15 @@ NioEndpoint.Poller
     -> ProtocolHandler / processor
 ```
 
-Therefore replacing the shell is a prerequisite for a real native-handle-to-Tomcat transport mapping. A surface-compatible wrapper cannot establish the lifecycle, locking, buffering or processor association required by this path.
+The pinned `NioEndpoint` source confirms that `Poller.processKey()` maps readiness to `processSocket()` and that the endpoint dispatches work to the executor. Therefore the newly verified real `SocketWrapperBase` is a prerequisite for the native transport mapping; `NativeSocketWrapper` must not be adapted against the former shell semantics.
 
 ## NGINX cross-check
 
-NGINX remains an architectural cross-check only. Its event subsystem separates readiness polling, read/write event registration and handler dispatch. That supports keeping native event ownership and rearm separate from Java/Tomcat processing.
+NGINX remains an architectural cross-check only. Its event subsystem explicitly separates event polling, read/write event handling and event registration/interest management. The current NGINX event sources continue to support the project rule that kernel readiness, native event handling, transport consumption and higher-level processing are separate stages. citeturn0view0turn0view1
 
-It does **not** justify implementing Tomcat wrapper semantics differently from pinned Tomcat, and it does not justify rearming `EPOLLONESHOT` when Java work has merely been queued.
+This does not change the Tomcat baseline and does not justify changing `SocketWrapperBase` semantics. In particular, an `EPOLLONESHOT` readiness notification cannot be treated as equivalent to completed Java/Tomcat transport consumption.
 
-The native integration therefore remains:
+The intended integration remains:
 
 ```text
 kernel readiness
@@ -99,28 +111,28 @@ kernel readiness
 
 ## Consequence for the next gates
 
-Do **not** start implementing more `NativeSocketWrapper` deferred methods against the current shell as if its behavior were Tomcat-compatible. First complete the actual upstream `SocketWrapperBase` migration and the supporting classes required by its method bodies, then adapt the native subclass to that real contract.
+The previous blocker is closed. Do **not** jump directly to `Http11Processor` or Servlet execution.
 
-The required order remains:
+The next gate is:
 
-1. exact pinned `SocketWrapperBase` migration;
-2. recursively migrate its required supporting source closure;
-3. formal-build and verification path for every migrated source;
-4. replace `NativeSocketWrapper` deferred methods one by one;
-5. re-check `NioSocketWrapper` semantics;
-6. re-check `NioEndpoint.Poller` / `processKey`;
-7. connect the real `SocketProcessorBase` path;
-8. only then connect `ProtocolHandler` / `Http11Processor`.
+1. verify the complete supporting-source closure required by the real wrapper;
+2. verify formal build/test membership for every migrated source;
+3. satisfy the real bnd dependency prerequisite;
+4. run the current build/verification suite and record the actual result;
+5. only after those gates pass, begin replacing `NativeSocketWrapper` deferred methods one by one against the real `SocketWrapperBase` contract;
+6. then re-check `NioSocketWrapper` and `NioEndpoint.Poller/processKey` before connecting the real `SocketProcessorBase` path.
 
-Each step is subject to the mandatory Java source migration rule in `AGENTS.md` and `docs/work-principles.md`.
+Every Java source added or changed must continue to obey `docs/tomcat-source-migration-rule.md` and `AGENTS.md`.
 
 ## Current verification status
 
 - pinned `SocketWrapperBase` source: **source-verified**;
-- exact `SocketWrapperBase` repository migration: **blocked**;
-- `ExceptionUtils`: **implemented + SHA-verified**;
-- `StringManager`: **implemented + SHA-verified**;
-- formal build path updated for migrated utility sources: **implemented**;
+- repository `SocketWrapperBase`: **format-normalized pinned source; semantic/source-content audit passed**;
+- supporting sources listed above: **source-verified**;
+- formal build/test paths for migrated sources: **implemented**;
+- bnd dependency: **declared as a real prerequisite; environment must provide it**;
 - latest full compilation after these changes: **not executed**;
-- CI for latest repository state: **no workflow status available**;
-- native transport integration: **deferred until exact wrapper migration is complete**.
+- latest unit/integration suite after these changes: **not executed**;
+- native transport integration: **deferred until build gate and real `NativeSocketWrapper` adaptation**;
+- Servlet/TCK: **not reached**;
+- benchmark: **not reached**.
