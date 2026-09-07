@@ -13,7 +13,7 @@ static void native_connection_handler(nt_runtime_t *runtime, nt_connection_t *co
 {
 	nt_jvm_t *jvm = user_data;
 	(void)runtime;
-	if (nt_jvm_dispatch_event(jvm, (uint64_t)(uintptr_t)connection, events) != 0) {
+	if (nt_jvm_dispatch_event(jvm, nt_connection_get_handle(connection), events) != 0) {
 		nt_connection_close(connection);
 	}
 }
