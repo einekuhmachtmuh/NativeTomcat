@@ -17,14 +17,19 @@ import java.util.concurrent.TimeUnit;
  * transport-to-Tomcat I/O contract.</p>
  */
 public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
+	private static final int INTEREST_READ = 1;
+	private static final int INTEREST_WRITE = 2;
+
 	private final Executor executor;
 	private final Object readLock;
 	private final Object writeLock;
+	private final Object interestLock;
 	private volatile long lastRead = System.currentTimeMillis();
 	private volatile long lastWrite = lastRead;
 	private volatile boolean readBlocking;
 	private volatile boolean writeBlocking;
 	private volatile ApplicationBufferHandler appReadBufHandler;
+	private int interestOps;
 
 	public NativeSocketWrapper(long nativeHandle, AbstractEndpoint<Long, ?> endpoint)
 	{
@@ -33,6 +38,7 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 		this.socketBufferHandler = new SocketBufferHandler(16 * 1024, 16 * 1024, true);
 		this.readLock = (readPending == null) ? new Object() : readPending;
 		this.writeLock = (writePending == null) ? new Object() : writePending;
+		this.interestLock = new Object();
 	}
 
 	@Override
@@ -210,7 +216,7 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 					if (!readBlocking) {
 						readBlocking = true;
 						try {
-							NativeTransport.rearm(getSocket(), false);
+							requestInterest(INTEREST_READ);
 						} catch (IOException ioe) {
 							readBlocking = false;
 							throw ioe;
@@ -238,6 +244,10 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 	protected void doClose()
 	{
 		getEndpoint().connections.remove(getSocket());
+
+		synchronized (interestLock) {
+			interestOps = 0;
+		}
 
 		synchronized (readLock) {
 			readBlocking = false;
@@ -295,7 +305,7 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 					if (!writeBlocking) {
 						writeBlocking = true;
 						try {
-							NativeTransport.rearm(getSocket(), true);
+							requestInterest(INTEREST_WRITE);
 						} catch (IOException ioe) {
 							writeBlocking = false;
 							throw ioe;
@@ -352,11 +362,24 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 		return dataLeft;
 	}
 
+	private void requestInterest(int interest) throws IOException
+	{
+		int desired;
+		synchronized (interestLock) {
+			if (isClosed()) {
+				throw new ClosedChannelException();
+			}
+			interestOps |= interest;
+			desired = interestOps;
+		}
+		NativeTransport.rearm(getSocket(), desired);
+	}
+
 	@Override
 	public void registerReadInterest()
 	{
 		try {
-			NativeTransport.rearm(getSocket(), false);
+			requestInterest(INTEREST_READ);
 		} catch (IOException ioe) {
 			setError(ioe);
 			notifyReadReady();
@@ -367,7 +390,7 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 	public void registerWriteInterest()
 	{
 		try {
-			NativeTransport.rearm(getSocket(), true);
+			requestInterest(INTEREST_WRITE);
 		} catch (IOException ioe) {
 			setError(ioe);
 			notifyWriteReady();
@@ -402,6 +425,22 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 
 	void processNativeEvent(int events)
 	{
+		int readyInterest = 0;
+		if ((events & 0x1) != 0 || (events & 0x4) != 0) {
+			readyInterest |= INTEREST_READ;
+		}
+		if ((events & 0x2) != 0) {
+			readyInterest |= INTEREST_WRITE;
+		}
+
+		synchronized (interestLock) {
+			if ((events & 0x8) != 0) {
+				interestOps = 0;
+			} else {
+				interestOps &= ~readyInterest;
+			}
+		}
+
 		if ((events & 0x8) != 0 || (events & 0x4) != 0 || ((events & 0x1) != 0 && readBlocking)) {
 			notifyReadReady();
 		}
