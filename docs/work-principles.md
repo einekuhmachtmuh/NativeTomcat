@@ -43,7 +43,17 @@
 **D. Re-align**
 - Source verification 後才決定下一步；新證據推翻 roadmap 時，修改 roadmap，不硬接續；每一步同步更新 code、docs、tests/steps。
 
-## 4. Coding / formatting
+## 4. DNS 受阻時的增量本機 mirror
+
+- 若確認 shell 的 Git/HTTP(S) 連線因 DNS、egress、proxy 或其他環境限制無法直接取得 repository，**不得反覆以 `git clone`、整 repo `curl` 等一次性方式繞過**；先記錄阻斷證據。
+- 若有可靠的官方替代通道（例如 GitHub connector），以該通道取得**目前 online target ref/commit**，再按檔案或必要時按小段內容增量轉移到 `/tmp/NativeTomcat-online/` 等本機 mirror；每個檔案記錄 online path、ref/commit、blob SHA，分段轉移時另記錄範圍與驗證結果。
+- 增量 mirror 必須保留本機 `.git`；每批轉移後先做 content/SHA 驗證，再 commit。不得把舊 archive、prototype 或不同版本 source 混入目前 target。
+- mirror 尚未完整時明確標示 `partial mirror`；只可對已轉移且驗證的 source 執行本機 build/test。不得把 partial mirror 當完整 checkout。
+- **DNS/外部網路受阻後，增量 mirror 成為當前工作的主要本機 repo**：後續 source audit、編輯、build、test、diff 與工作記錄優先以此 mirror 執行；online official channel 僅作 source/reference、同步與 SHA/diff 驗證，不因 online 可讀而假裝本機已完整同步。
+- 若工作需要尚未轉入 mirror 的檔案，先從官方替代通道增量取得並驗證，再繼續；若必要 source 無法取得，標示 `source-verification incomplete/blocked`。
+- mirror 與 online target 的差異仍依本文件第 3 節分類；任何重要修改後重新取得 online ref/commit 核對。
+
+## 5. Coding / formatting
 
 - 新增或修改的 C、Java、Ant code 使用 Tab。
 - **前大括弧 `{` 一律換行**：
@@ -57,7 +67,7 @@ int main()
 
 - 未修改的 upstream source 不因本規則重新排版；已手動標準化的 migrated source 必須記錄為 `format-normalized`，不得稱 `byte-identical`。
 
-## 5. C/Java integration gate
+## 6. C/Java integration gate
 
 設計原則：**C network/runtime + Java Servlet execution**，不是把 Tomcat 翻成 C。C 優先處理 socket、accept、event loop、readiness、connection state、I/O buffer、適合 native 化的 syscall-intensive path、TLS integration、back-pressure、native resource lifecycle；Java 保留 Servlet API、application lifecycle、dispatch、Filter/Listener/Session、ClassLoader、JSP/Jasper 與 application semantics。每個 boundary 定義 representation、ownership、mutability、lifetime、thread affinity、ABI、error semantics。
 
@@ -89,7 +99,7 @@ exactly one rearm / close
 - `kernel readiness` ≠ Servlet `isReady()`；`event dispatched` ≠ `event consumed`；`Java task submitted` ≠ `SocketProcessor processed`。
 - 真實 `SocketWrapper → processSocket → SocketProcessor → ProtocolHandler` 建立前，不得跳到 `Http11Processor` 或 Servlet integration。
 
-## 6. Ownership、request/response、C 化決策
+## 7. Ownership、request/response、C 化決策
 
 每個 native handle 定義 create/transfer/borrow/return/destroy；每個資料結構定義 owner、lifetime、thread、sync、copy/no-copy、error、cancel、cleanup、back-pressure。不得以「應該不會發生」合理化 NULL、overflow、UAF、double-free、race。
 
@@ -98,7 +108,7 @@ Request/response flow 必須以 source 對照：
 
 候選 C 化元件至少評估 crossing、hot-path、allocation/GC、copy/bandwidth、syscall、lock/atomic/context switch、JIT 可最佳化程度、complexity、thread-safety、ownership/lifetime、安全、維護與 benchmarkability。若 C 化增加 crossing/copy/sync/lifecycle complexity，預設不 C 化；Servlet/application semantics 預設 Java 優先。
 
-## 7. Build、test、安全與證據
+## 8. Build、test、安全與證據
 
 - **Ant 是唯一正式 build/test orchestrator**；沿用 pinned Tomcat build 架構，不以 Maven/Gradle/CMake/Meson 取代。
 - Native compile/link、Java compile、tests、Servlet tests、benchmark 均須可由 Ant 驅動。
@@ -112,7 +122,7 @@ Request/response flow 必須以 source 對照：
 
 Benchmark 至少記錄 latency（平均/P50/P95/P99/P99.9）、throughput、connections、keep-alive、RSS/heap/native memory、allocation、GC、syscall、context switch、lock contention、CPU、JNI/FFM crossing、bytes copied、TLS cost、error rate、overload tail latency，並在相同硬體/OS/JDK/compiler/workload 下比較。若 C 化較慢，保留結果並修改架構，不扭曲結論。
 
-## 8. 工作記錄與 roadmap
+## 9. 工作記錄與 roadmap
 
 每完成重要步驟記錄：修改檔案、source/spec/version/commit、採用 contract、code/docs/steps 修正、最高 verification level、本機/線上 diff 狀態、remaining/blocked/deferred。
 
