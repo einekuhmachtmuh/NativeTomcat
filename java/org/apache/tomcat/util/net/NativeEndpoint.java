@@ -91,23 +91,16 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
 		}
 
 		if ((events & 0x1) != 0 || (events & 0x4) != 0) {
-			if (!readBlocking) {
-				return processSocket(wrapper, SocketEvent.OPEN_READ, false);
+			if (!readBlocking && !processSocket(wrapper, SocketEvent.OPEN_READ, false)) {
+				return false;
 			}
-			if ((events & 0x2) == 0 || writeBlocking) {
-				return true;
-			}
+		}
+
+		if ((events & 0x2) != 0 && !writeBlocking) {
 			return processSocket(wrapper, SocketEvent.OPEN_WRITE, false);
 		}
 
-		if ((events & 0x2) != 0) {
-			if (writeBlocking) {
-				return true;
-			}
-			return processSocket(wrapper, SocketEvent.OPEN_WRITE, false);
-		}
-
-		return false;
+		return true;
 	}
 
 	@Override
