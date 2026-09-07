@@ -199,6 +199,8 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 	@Override
 	protected void doClose()
 	{
+		getEndpoint().connections.remove(getSocket());
+
 		synchronized (readLock) {
 			readBlocking = false;
 			readLock.notifyAll();
