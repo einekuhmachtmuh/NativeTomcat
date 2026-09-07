@@ -1,37 +1,36 @@
 # NativeTomcat 工作基本原則
 
-本文件是 NativeTomcat 的**現行強制工作守則**：規範工作方法與驗證門檻，不是永久不變的 roadmap 或規格。若新的 source、測試或實測證據顯示規則需要調整，**可以且應該修改本文件**；修改後以新版本作為後續工作的基準。每個新步驟仍須重新核驗現況。
+本文件是 NativeTomcat 的**現行強制工作守則**；它規範工作方法與驗證門檻，不是不可修改的永久 roadmap。若新 source、測試或實測證據推翻現有判斷，應先更新本文件/roadmap，再繼續工作。
 
-## 1. 不可違反的原則
+## 1. 不可違反
 
 1. 使用繁體中文與臺灣電腦科學慣用術語。
-2. 新增/修改的 C、Java、Ant 原始碼使用 Tab 縮排；未修改的上游 source 保留原格式。
-3. 重要結論必須回溯到可驗證 source、spec 或可靠技術文件；無法確認即標示 `未確認 / blocked`，不得猜測。
-4. 嚴格區分：spec requirement、upstream implementation、NativeTomcat design、theoretical analysis、measured result。
+2. 新增/修改的 C、Java、Ant 原始碼使用 Tab；未修改的 upstream source 保留原格式。
+3. 重要結論必須可回溯至 source、spec 或可靠技術文件；無法確認即標示 `未確認 / blocked`，不得猜測。
+4. 嚴格區分 `spec requirement`、`upstream implementation`、`NativeTomcat design`、`theoretical analysis`、`measured result`。
 5. 不得把 C、event loop、native memory、JNI/FFM、較少 GC 等本身當成效能證據；效能主張必須有成本模型與 benchmark。
 6. 不得虛構檔案、類別、函式、API、測試或 benchmark；`compile/surface test PASS` 不等於 runtime semantics 正確。
+7. **若 GitHub/外部網路受阻，先確認阻斷；有可靠的官方替代通道時直接繞過繼續工作；只有必要 source 無法取得或核驗時才標示 `blocked`。**
 
 ## 2. 固定基準與 source-first
 
 - Servlet：Jakarta Servlet 6.1；Compatibility Mode 維持外部可觀察語意。
-- Tomcat：11.0.25，pinned `cbe6e15ee81e2fc6232954292a80cca5d1e84009`；不得用未核驗的 Tomcat `main` 取代。
-- NGINX：工作開始時核實的官方 source/release，僅作 native event architecture reference，不是 Servlet/Tomcat requirement。
+- Tomcat：11.0.25，pinned `cbe6e15ee81e2fc6232954292a80cca5d1e84009`；不得以未核驗的 Tomcat `main` 取代。
+- NGINX：工作開始時核實的官方 source/release，只作 native event architecture reference，不是 Servlet/Tomcat requirement。
 - HotSpot：以實際支援的 OpenJDK 正式版本及固定 tag/commit 為準。
-- Source 優先順序：官方 Git repository → official raw source → official release → official specification；核心結論不得依賴第三方 fork。
-- 凡 implementation/planning/debugging/verification materially 涉及 Tomcat Java implementation class：先檢查 repo `java/` 原 package/path；已有則核對，沒有則先取得 pinned exact source，禁止憑記憶/API 文件重建。Supporting classes 遞迴遵守同規則。
+- Source 優先序：官方 Git repository → official raw source → official release → official specification；核心結論不得依賴第三方 fork。
+- 凡 implementation/planning/debugging/verification materially 涉及 Tomcat Java implementation class：先檢查 repo `java/` 原 package/path；已有則核對，沒有則先取得 pinned exact source，禁止憑記憶/API 文件重建；supporting classes 遞迴遵守。
 - Exact source 無法取得/核驗 → `source-verification incomplete/blocked`，不得宣稱 migration/equivalence 完成。
-- Java source migration 後，`build.xml` 與 `build_test.xml` 都必須有明確 compile/verification path。
+- Java source migration 後，`build.xml`、`build_test.xml` 都必須有明確 compile/verification path。
 - Compatibility shell 只能是明確標示的暫時 checkpoint；不能因 method name、compile 或 surface test 相同而視為 upstream equivalent。
 
-## 3. 每一步的核驗流程
-
-依序：
+## 3. 每一步核驗流程
 
 **A. Repo / docs**
-- 先讀相關 code、tests、build path 與所有直接相關 docs；區分 `source exists`、`implemented`、`tested`。
-- 有本機 Git 才能做 Git diff：記錄 local HEAD/status 與 online target SHA；沒有 `.git` 只能做 snapshot content comparison。
-- 優先完整 commit/ref diff；差異分類為 local-unsynced、online-only、untracked/uncommitted、format/line-ending、uncomparable。
-- 每個重要修改後確認 online commit、重新取得 ref 再比；差異未解釋前標示 `not synchronized / diff incomplete / verification blocked`。
+- 先讀相關 code、tests、build path、直接相關 docs；區分 `source exists`、`implemented`、`tested`。
+- 有本機 Git 才做 Git diff；記錄 local HEAD/status 與 online target SHA。沒有 `.git` 只能做 snapshot content comparison。
+- 優先完整 commit/ref diff；差異分類為 `local-unsynced`、`online-only`、`untracked/uncommitted`、`format/line-ending`、`uncomparable`。
+- 每個重要修改後重新取得 ref/commit 核對；差異未解釋前標示 `not synchronized / diff incomplete / verification blocked`。
 
 **B. Tomcat**
 - 核對實際 method body、call chain、ownership/lifetime、locking、executor/thread model、event mapping、buffer/read/write、error/close/recycle 與 abstract/subclass contract。
@@ -42,12 +41,12 @@
 - 固定分層：`kernel readiness → native event handling → transport consumption → Java/Tomcat processing → Servlet readiness`；不同層不得視為同一語意。
 
 **D. Re-align**
-- Source verification 後才決定下一步；新證據推翻 roadmap 時，修改 roadmap，不硬接續。每一步同步更新 code、docs、tests/steps。
+- Source verification 後才決定下一步；新證據推翻 roadmap 時，修改 roadmap，不硬接續；每一步同步更新 code、docs、tests/steps。
 
-## 4. Coding / formatting policy
+## 4. Coding / formatting
 
-- 新增或修改的 C、Java、Ant code 使用 Tab 縮排。
-- **前大括弧 `{` 一律換行**：函式、類別、控制流程與其他 block 均採：
+- 新增或修改的 C、Java、Ant code 使用 Tab。
+- **前大括弧 `{` 一律換行**：
 
 ```text
 int main()
@@ -56,15 +55,13 @@ int main()
 }
 ```
 
-- 未修改的 upstream source 不因本規則重新排版；已手動標準化的 migrated upstream source 必須明確記錄為 format-normalized，而非聲稱 byte-identical。
+- 未修改的 upstream source 不因本規則重新排版；已手動標準化的 migrated source 必須記錄為 `format-normalized`，不得稱 `byte-identical`。
 
-## 5. C/Java 與固定 integration gate
+## 5. C/Java integration gate
 
-設計原則：**C network/runtime + Java Servlet execution**，不是把 Tomcat 翻成 C。
+設計原則：**C network/runtime + Java Servlet execution**，不是把 Tomcat 翻成 C。C 優先處理 socket、accept、event loop、readiness、connection state、I/O buffer、適合 native 化的 syscall-intensive path、TLS integration、back-pressure、native resource lifecycle；Java 保留 Servlet API、application lifecycle、dispatch、Filter/Listener/Session、ClassLoader、JSP/Jasper 與 application semantics。每個 boundary 定義 representation、ownership、mutability、lifetime、thread affinity、ABI、error semantics。
 
-C 優先處理 socket、accept、event loop、readiness、connection state、I/O buffer、適合 native 化的 syscall-intensive path、TLS integration、back-pressure、native resource lifecycle；Java 優先保留 Servlet API、application lifecycle、dispatch、Filter/Listener/Session、ClassLoader、JSP/Jasper 與 application semantics。每個 boundary 必須定義 representation、ownership、mutability、lifetime、thread affinity、ABI、error semantics。
-
-固定 integration gate：
+固定 gate：
 
 ```text
 Native event
@@ -92,41 +89,34 @@ exactly one rearm / close
 - `kernel readiness` ≠ Servlet `isReady()`；`event dispatched` ≠ `event consumed`；`Java task submitted` ≠ `SocketProcessor processed`。
 - 真實 `SocketWrapper → processSocket → SocketProcessor → ProtocolHandler` 建立前，不得跳到 `Http11Processor` 或 Servlet integration。
 
-## 6. Ownership、request/response 與 C 化決策
+## 6. Ownership、request/response、C 化決策
 
-每個 native handle 定義 create/transfer/borrow/return/destroy；每個資料結構定義 owner、lifetime、thread、sync、copy/no-copy、error、cancel、cleanup、back-pressure。避免不必要的 getter/API crossing；優先批次、direct/borrowed buffer、固定 lifetime。不得以「應該不會發生」合理化 NULL、overflow、UAF、double-free、race。
+每個 native handle 定義 create/transfer/borrow/return/destroy；每個資料結構定義 owner、lifetime、thread、sync、copy/no-copy、error、cancel、cleanup、back-pressure。不得以「應該不會發生」合理化 NULL、overflow、UAF、double-free、race。
 
-實際 request/response flow 必須以 source 對照：
+Request/response flow 必須以 source 對照：
 `Client → TCP/TLS → socket → accept → event loop → connection state → read buffer → HTTP parser → Request metadata → mapping → Context/Wrapper → Filter chain → Servlet.service() → response buffer → HTTP encoding/chunking → TLS → socket write → keep-alive/close`。
 
 候選 C 化元件至少評估 crossing、hot-path、allocation/GC、copy/bandwidth、syscall、lock/atomic/context switch、JIT 可最佳化程度、complexity、thread-safety、ownership/lifetime、安全、維護與 benchmarkability。若 C 化增加 crossing/copy/sync/lifecycle complexity，預設不 C 化；Servlet/application semantics 預設 Java 優先。
 
-## 7. Build、test、安全與證據層級
+## 7. Build、test、安全與證據
 
 - **Ant 是唯一正式 build/test orchestrator**；沿用 pinned Tomcat build 架構，不以 Maven/Gradle/CMake/Meson 取代。
-- Native compile/link、Java compile、tests、Servlet tests、benchmark 都須可由 Ant 驅動。
+- Native compile/link、Java compile、tests、Servlet tests、benchmark 均須可由 Ant 驅動。
 - 測試前確認 OS/arch、JDK/JAVA_HOME、Ant、compiler/linker、JNI headers、OpenSSL、system libs、library path、port、dependencies、permissions；環境未完成則 fail，不進 benchmark。
 - 分開記錄 Tomcat tests、NativeTomcat tests、Servlet TCK、benchmark。
 - 安全至少覆蓋 parsing、URI/header validation、size/timeout/keep-alive/slowloris、memory/integer safety、race/UAF/double-free、TLS/cert/ALPN/HTTP2、request smuggling、path traversal、malformed input、resource exhaustion、shutdown/cancellation/cleanup。
 
-最高已驗證層級：
-1. `source-verified`
-2. `implemented`
-3. `compiled`
-4. `unit-tested`
-5. `integration-tested`
-6. `Servlet/TCK-tested`
-7. `benchmark-verified`
+最高已驗證層級：`source-verified` → `implemented` → `compiled` → `unit-tested` → `integration-tested` → `Servlet/TCK-tested` → `benchmark-verified`。
 
-可另標 `specification-verified`、`theoretical analysis`，但不能取代 runtime verification；任何低層級結果不得升級成高層級結論。
+可另標 `specification-verified`、`theoretical analysis`，但不能取代 runtime verification；低層級結果不得升級成高層級結論。
 
-Benchmark 至少記錄 latency (平均/P50/P95/P99/P99.9)、throughput、connections、keep-alive、RSS/heap/native memory、allocation、GC、syscall、context switch、lock contention、CPU、JNI/FFM crossing、bytes copied、TLS cost、error rate、overload tail latency，並在相同硬體/OS/JDK/compiler/workload 下比較。若 C 化較慢，保留結果並修改架構，不扭曲結論。
+Benchmark 至少記錄 latency（平均/P50/P95/P99/P99.9）、throughput、connections、keep-alive、RSS/heap/native memory、allocation、GC、syscall、context switch、lock contention、CPU、JNI/FFM crossing、bytes copied、TLS cost、error rate、overload tail latency，並在相同硬體/OS/JDK/compiler/workload 下比較。若 C 化較慢，保留結果並修改架構，不扭曲結論。
 
-## 8. 工作記錄與目前 roadmap
+## 8. 工作記錄與 roadmap
 
 每完成重要步驟記錄：修改檔案、source/spec/version/commit、採用 contract、code/docs/steps 修正、最高 verification level、本機/線上 diff 狀態、remaining/blocked/deferred。
 
-第一階段目標是可驗證的最小 end-to-end path，不是一次重寫 Tomcat。固定 gate 不得跳過；目前順序為：
+第一階段目標是可驗證的最小 end-to-end path，不是一次重寫 Tomcat；固定 gate 不得跳過。目前順序：
 
 `SocketWrapperBase → supporting source closure → NativeSocketWrapper → NioEndpoint.NioSocketWrapper/Poller/processKey → real processSocket/SocketProcessorBase → transport consumption → Http11Processor → CoyoteAdapter/Catalina/Servlet`
 
