@@ -13,11 +13,17 @@
 - NativeTomcat's current native runtime uses `EPOLLONESHOT`; its native event-loop owner applies the final epoll interest mask.
 - NGINX's official event layer keeps READ/WRITE state independent and does not establish the Java executor completion boundary required here. NGINX is therefore an architecture cross-check, not a lifecycle implementation source.
 
+## Newly verified current-code gate
+
+The current `NativeEndpoint.processNativeEvent()` calls `processSocket(..., false)` for ERROR/OPEN_READ/OPEN_WRITE. In the pinned `AbstractEndpoint.processSocket()` contract, `dispatch=false` executes `SocketProcessorBase.run()` synchronously instead of submitting it to `getExecutor()`. Therefore the current NativeEndpoint does **not** yet exercise the Tomcat executor completion boundary required by the proposed epoch bridge. This is source-verified, not a theoretical concern.
+
+The existing `NativeEventDispatcher` is an independent executor/coalescing helper, but repository search did not find a current construction/use site. It therefore cannot be treated as the active completion boundary without further source verification and integration.
+
 ## Candidate bridge
 
 ### 1. Keep Tomcat's real `processSocket()` path
 
-Do not replace `AbstractEndpoint.processSocket()` with a parallel submission mechanism. `NativeEndpoint.processNativeEvent()` should continue to invoke the inherited `processSocket()` so the pinned `SocketProcessorBase` contract remains the dispatch boundary.
+Do not replace `AbstractEndpoint.processSocket()` with a parallel submission mechanism merely to obtain completion callbacks. First determine whether NativeTomcat can preserve the inherited dispatch contract while adding an explicit completion envelope. If that requires overriding `processSocket()` or changing a pinned shared class, compare the exact upstream contract and lifecycle consequences before implementation.
 
 ### 2. Introduce an explicit native-readiness epoch token
 
@@ -53,7 +59,7 @@ This captures both paths:
 - normal `run()` → `doRun()` → return;
 - closed-before-`doRun()` → immediate return from `SocketProcessorBase.run()`.
 
-The inherited `processSocket()` remains the submission API and Tomcat's executor remains the actual worker owner.
+The inherited `processSocket()` remains the preferred submission API if the envelope can be introduced without breaking its lifecycle contract.
 
 ### 5. Finalization rule
 
@@ -93,7 +99,7 @@ NGINX's official event implementation maintains independent read/write event sta
 
 ## Implementation gate
 
-Before modifying `NativeEndpoint` or `NativeSocketWrapper`, source-verify the exact Tomcat executor lifecycle methods used by `AbstractEndpoint.getExecutor()`, `createExecutor()` and `shutdownExecutor()`, then implement the smallest executor-envelope prototype.
+Before modifying `NativeEndpoint` or `NativeSocketWrapper`, source-verify the exact Tomcat executor lifecycle methods used by `AbstractEndpoint.getExecutor()`, `setExecutor()`, `createExecutor()` and `shutdownExecutor()`, and verify how `NativeEndpoint` can preserve executor ownership during an envelope. Then implement the smallest executor-envelope prototype.
 
 The prototype must add tests for:
 
