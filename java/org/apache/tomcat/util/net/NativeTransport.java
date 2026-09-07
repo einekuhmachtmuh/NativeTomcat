@@ -9,14 +9,8 @@ import java.nio.ByteBuffer;
  */
 final class NativeTransport {
 
-    static {
-        register();
-    }
-
     private NativeTransport() {
     }
-
-    private static native void register();
 
     static native int read(long handle, ByteBuffer buffer) throws IOException;
 
