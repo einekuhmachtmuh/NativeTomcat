@@ -46,7 +46,7 @@
             <include name="org/apache/tomcat/util/buf/*.java"/>
             <include name="org/apache/juli/logging/*.java"/>
             <include name="org/apache/tomcat/util/res/*.java"/>
-            <include name="org/apache/tomcat/util/net/*.java"/>
+            <include name="org/apache/tomcat/util/net/**/*.java"/>
         </javac>
     </target>
 
@@ -58,7 +58,7 @@
             <include name="org/apache/tomcat/util/buf/*.java"/>
             <include name="org/apache/juli/logging/*.java"/>
             <include name="org/apache/tomcat/util/res/*.java"/>
-            <include name="org/apache/tomcat/util/net/*.java"/>
+            <include name="org/apache/tomcat/util/net/**/*.java"/>
         </javac>
         <java classname="org.apache.tomcat.nativebootstrap.NativeEventDispatcherUnitTest" fork="true" failonerror="true"><classpath><pathelement location="${java.test.classes}"/></classpath></java>
     </target>
@@ -78,7 +78,7 @@
             <include name="org/apache/tomcat/util/buf/*.java"/>
             <include name="org/apache/juli/logging/*.java"/>
             <include name="org/apache/tomcat/util/res/*.java"/>
-            <include name="org/apache/tomcat/util/net/*.java"/>
+            <include name="org/apache/tomcat/util/net/**/*.java"/>
         </javac>
         <java classname="org.apache.tomcat.nativebootstrap.SocketWrapperSurfaceTest" fork="true" failonerror="true"><classpath><pathelement location="${java.test.classes}"/></classpath></java>
     </target>
