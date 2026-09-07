@@ -29,7 +29,9 @@ public final class NativeEventDispatcher {
     private final Executor executor;
     private final EventProcessor processor;
     private final ConcurrentMap<Long, PendingEvent> pending = new ConcurrentHashMap<>();
-    private volatile boolean accepting = true;
+    private final Object lifecycleMonitor = new Object();
+    private int activeTasks;
+    private boolean accepting = true;
 
     public NativeEventDispatcher(Executor executor, EventProcessor processor) {
         this.executor = Objects.requireNonNull(executor);
@@ -40,34 +42,56 @@ public final class NativeEventDispatcher {
      * Queue a native event. The caller is the native event-loop thread; it does not run the processor.
      */
     public void dispatch(long connectionHandle, int events) {
-        if (!accepting || events == 0) {
-            return;
+        PendingEvent state;
+        boolean submit;
+
+        synchronized (lifecycleMonitor) {
+            if (!accepting || events == 0) {
+                return;
+            }
+
+            state = pending.computeIfAbsent(connectionHandle, ignored -> new PendingEvent());
+            state.events.getAndAccumulate(events, (current, added) -> current | added);
+            submit = state.scheduled.compareAndSet(false, true);
+            if (submit) {
+                activeTasks++;
+            }
         }
 
-        PendingEvent state = pending.computeIfAbsent(connectionHandle, ignored -> new PendingEvent());
-        state.events.getAndAccumulate(events, (current, added) -> current | added);
-        schedule(connectionHandle, state);
+        if (submit) {
+            try {
+                executor.execute(() -> run(connectionHandle, state));
+            } catch (RuntimeException e) {
+                synchronized (lifecycleMonitor) {
+                    state.scheduled.set(false);
+                    pending.remove(connectionHandle, state);
+                    activeTasks--;
+                    lifecycleMonitor.notifyAll();
+                }
+                throw e;
+            }
+        }
     }
 
     /**
-     * Stop accepting new events and discard queued state after already submitted tasks drain.
+     * Stop accepting new events, discard queued state and wait for submitted processors to finish.
+     *
+     * <p>The wait is required because native connection objects remain runtime-owned while Tomcat worker tasks may
+     * still be consuming them. Runtime teardown must not free those objects before the Java-side processing has
+     * drained.</p>
      */
     public void stop() {
-        accepting = false;
-        pending.clear();
-    }
-
-    private void schedule(long connectionHandle, PendingEvent state) {
-        if (!state.scheduled.compareAndSet(false, true)) {
-            return;
-        }
-
-        try {
-            executor.execute(() -> run(connectionHandle, state));
-        } catch (RuntimeException e) {
-            state.scheduled.set(false);
-            pending.remove(connectionHandle, state);
-            throw e;
+        synchronized (lifecycleMonitor) {
+            accepting = false;
+            pending.clear();
+            while (activeTasks != 0) {
+                try {
+                    lifecycleMonitor.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted while draining native event tasks", e);
+                }
+            }
         }
     }
 
@@ -81,11 +105,15 @@ public final class NativeEventDispatcher {
                 processor.process(connectionHandle, events);
             }
         } finally {
-            state.scheduled.set(false);
-            if (state.events.get() != 0 && accepting) {
-                schedule(connectionHandle, state);
-            } else {
+            synchronized (lifecycleMonitor) {
+                state.scheduled.set(false);
+                if (state.events.get() != 0 && accepting) {
+                    state.scheduled.set(true);
+                    return;
+                }
                 pending.remove(connectionHandle, state);
+                activeTasks--;
+                lifecycleMonitor.notifyAll();
             }
         }
     }
