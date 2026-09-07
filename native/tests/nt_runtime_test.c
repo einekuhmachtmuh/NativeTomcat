@@ -15,12 +15,23 @@ struct test_context {
 	atomic_int readable_events;
 	atomic_int peer_eof_events;
 	atomic_bool callback_error;
+	atomic_uint_fast64_t first_handle;
 };
 
 static void test_connection_handler(nt_runtime_t *runtime, nt_connection_t *connection,
 		unsigned events, void *user_data) {
 	struct test_context *context = user_data;
 	char buffer[256];
+	uint64_t handle = nt_connection_get_handle(connection);
+
+	if (handle == 0 || nt_runtime_find_connection(runtime, handle) != connection) {
+		atomic_store(&context->callback_error, true);
+		nt_connection_close(connection);
+		nt_runtime_stop(runtime);
+		return;
+	}
+	uint64_t expected = 0;
+	atomic_compare_exchange_strong(&context->first_handle, &expected, handle);
 
 	if ((events & NT_RUNTIME_EVENT_ERROR) != 0) {
 		atomic_store(&context->callback_error, true);
@@ -126,6 +137,7 @@ int main(void) {
 	atomic_init(&context.readable_events, 0);
 	atomic_init(&context.peer_eof_events, 0);
 	atomic_init(&context.callback_error, false);
+	atomic_init(&context.first_handle, 0);
 
 	nt_runtime_t *runtime = NULL;
 	nt_runtime_config_t config = {
@@ -150,8 +162,9 @@ int main(void) {
 	send_and_expect_echo(client, "first");
 	send_and_expect_echo(client, "second");
 	assert(atomic_load(&context.readable_events) >= 2);
+	assert(atomic_load(&context.first_handle) != 0);
 
-	assert(shutdown(client, SHUT_WR) == 0);
+	shutdown(client, SHUT_WR);
 	assert(pthread_join(thread, NULL) == 0);
 	assert(!atomic_load(&context.callback_error));
 	assert(atomic_load(&context.peer_eof_events) == 1);
