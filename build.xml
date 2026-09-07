@@ -50,6 +50,8 @@
 			<include name="org/apache/juli/logging/*.java" />
 			<!-- Recursive net closure is required once pinned JSSE/cipher subpackages are present. -->
 			<include name="org/apache/tomcat/util/net/**/*.java" />
+			<!-- NativeEndpoint is a NativeTomcat implementation boundary, not a copied Tomcat source file. -->
+			<include name="org/apache/tomcat/util/net/NativeEndpoint.java" />
 		</javac>
 	</target>
 
