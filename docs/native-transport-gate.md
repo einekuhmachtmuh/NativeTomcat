@@ -9,7 +9,7 @@ This document records the source-verified contract for the next NativeTomcat int
 - `NativeTransport.java` defines the intended Java/native transport boundary, but no JNI implementation is registered yet.
 - Native connection handles are stable `uint64_t` values and are looked up through the native runtime registry.
 - Native epoll uses `EPOLLIN | EPOLLRDHUP | EPOLLONESHOT`, with optional `EPOLLOUT`. `EPOLLONESHOT` is a NativeTomcat ownership choice; it is not a claim that NGINX uses the same epoll mode.
-- The native runtime has a thread-safe command queue and eventfd wake path for `REARM(handle, wantWrite)` and `CLOSE(handle)`. Submission is rejected after shutdown begins, and commands for one drained batch are coalesced so `CLOSE` dominates and only the final `REARM` state survives otherwise. This is source-implemented but not yet locally compiled/runtime-tested in the current environment.
+- The native runtime has a thread-safe command queue and eventfd wake path for `REARM(handle, wantWrite)` and `CLOSE(handle)`. Submission is rejected after shutdown begins, and commands for one drained batch are coalesced so `CLOSE` dominates and only the final `REARM` state survives otherwise. Connection epoll events carry stable handles rather than native object pointers, and closed handles are no longer returned by the active registry lookup. This is source-implemented but not yet locally compiled/runtime-tested in the current environment.
 
 ## Tomcat contract
 
@@ -66,10 +66,13 @@ The native command queue is implemented at the runtime layer:
 5. Within one drained batch, commands for the same handle are coalesced: a `CLOSE` dominates any `REARM`, otherwise only the final `REARM` state is retained. Relative order across distinct handles is preserved.
 6. Once `stop_requested` is set, new command submission is rejected with `ECANCELED`, including a second check while holding `command_mutex` to close the stop/enqueue race.
 7. Runtime shutdown discards commands before connection destruction; callers must not use the runtime after destruction.
+8. Connection epoll events carry the stable handle in `epoll_event.data.u64`; the event loop resolves it through the active registry before dereferencing a connection object. This removes the old dependency on an epoll event retaining a raw `nt_connection_t *` across close processing.
 
 This is deliberately analogous to the pinned Tomcat `NioEndpoint.Poller`: Tomcat queues `PollerEvent`s, wakes the selector, and lets the poller thread apply registration/interest changes. NativeTomcat preserves that ownership pattern while replacing the Java `Selector` with the native epoll owner.
 
-The focused native test now covers both sides of the command boundary: the first connection event is consumed without a direct rearm from the event callback, the test thread submits `REARM(handle, false)`, a second request is processed, then the test thread submits `CLOSE(handle)` and verifies that the native connection reaches `CLOSED`. After `nt_runtime_stop()`, both request APIs are verified to reject with `ECANCELED`.
+The focused native test covers the command boundary: the first connection event is consumed without a direct rearm from the event callback, the test thread submits `REARM(handle, false)`, a second request is processed, then multiple rearm requests followed by `CLOSE(handle)` are submitted and the connection is verified closed. It also verifies that a closed handle is no longer an active registry result, that commands targeting that closed handle are harmless, and that both request APIs reject with `ECANCELED` after `nt_runtime_stop()`.
+
+The test demonstrates the required final-state semantics, but it does not instrument `epoll_ctl()` to count syscalls. Therefore `exactly one rearm/close` remains a runtime-observability item rather than a measured syscall-count result until an executable test environment is available.
 
 ## Blocking-read requirement
 
