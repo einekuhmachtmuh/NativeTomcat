@@ -74,7 +74,10 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
         if (event == null) {
             return false;
         }
-        return processSocket(wrapper, event, true);
+        // NativeEventDispatcher has already serialized and scheduled this task
+        // on the Tomcat Executor. Avoid a second executor hop here; process the
+        // real Tomcat SocketProcessorBase on the current executor worker.
+        return processSocket(wrapper, event, false);
     }
 
     private SocketEvent toSocketEvent(int events) {
