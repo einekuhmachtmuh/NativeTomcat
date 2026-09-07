@@ -62,6 +62,8 @@
 			     dependency closure is complete. build_test.xml remains the broader
 			     intermediate verification entry point. -->
 			<include name="org/apache/tomcat/nativebootstrap/*.java" />
+			<include name="org/apache/tomcat/util/*.java" />
+			<include name="org/apache/tomcat/util/res/*.java" />
 			<include name="org/apache/tomcat/util/buf/ByteBufferHolder.java" />
 			<include name="org/apache/tomcat/util/net/*.java" />
 		</javac>
