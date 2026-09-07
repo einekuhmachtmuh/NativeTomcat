@@ -229,7 +229,7 @@ JNIEXPORT jint JNICALL Java_org_apache_tomcat_util_net_NativeTransport_write(JNI
 }
 
 JNIEXPORT void JNICALL Java_org_apache_tomcat_util_net_NativeTransport_rearm(JNIEnv *env, jclass clazz,
-		jlong handle, jboolean want_write)
+		jlong handle, jint interest_mask)
 {
 	nt_runtime_t *runtime;
 	int rc;
@@ -246,7 +246,7 @@ JNIEXPORT void JNICALL Java_org_apache_tomcat_util_net_NativeTransport_rearm(JNI
 		nt_native_transport_throw_io(env, "native transport runtime is not bound");
 		return;
 	}
-	rc = nt_runtime_request_rearm(runtime, (uint64_t)handle, want_write == JNI_TRUE);
+	rc = nt_runtime_request_rearm(runtime, (uint64_t)handle, (unsigned)interest_mask);
 	pthread_rwlock_unlock(&nt_native_transport_lock);
 	if (rc != 0) {
 		char message[128];
