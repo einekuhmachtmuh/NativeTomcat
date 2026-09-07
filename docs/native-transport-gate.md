@@ -26,6 +26,19 @@ The pinned `SocketWrapperBase` contract requires transport implementations to pr
 
 The pinned NIO implementation also distinguishes Java/Tomcat read semantics from kernel readiness. A non-blocking read can return no data; a blocking read waits for a future readiness event. EOF is distinct from `WOULD_BLOCK` and must reach Tomcat close/read semantics rather than being treated as ordinary zero-byte data.
 
+## Latest NioSocketWrapper source audit
+
+The pinned Tomcat 11.0.25 `NioEndpoint.NioSocketWrapper` was re-audited before advancing this gate:
+
+1. `read(boolean, byte[])` first consumes Tomcat's socket read buffer, then calls `fillReadBuffer(block)` and updates the last-read timestamp. `read(boolean, ByteBuffer)` either reads directly into a sufficiently large destination or fills the Tomcat read buffer first.
+2. `fillReadBuffer(block, buffer)` performs the actual non-blocking channel read. `-1` becomes `EOFException`; `0` in blocking mode sets `readBlocking`, calls `registerReadInterest()`, and waits on `readLock`. It does not perform a blocking kernel read on the Java worker thread.
+3. `doWrite(block, buffer)` uses the same separation in the write direction: blocking mode waits on `writeLock` after registering write interest when the non-blocking channel cannot progress; non-blocking mode stops when the channel cannot accept more data and relies on write readiness to continue.
+4. `registerReadInterest()` and `registerWriteInterest()` enqueue interest changes into the Tomcat Poller. The Poller owns selector registration and wakeup. This is the direct Tomcat precedent for NativeTomcat's native command queue.
+5. `doClose()` removes the connection from the endpoint registry, closes the channel, releases/reset buffers and cached channel state, and closes pending sendfile state. Native close therefore has to preserve both transport lifetime and Tomcat wrapper cleanup semantics.
+6. `isReadyForRead()` first exposes already-buffered application data and otherwise attempts a non-blocking fill; it is not equivalent to the native kernel `EPOLLIN` bit.
+
+The audit shows that the next implementation step is specifically **transport consumption plus wait/wakeup state**, not `Http11Processor` changes and not a new endpoint dispatch path.
+
 ## Native ownership contract
 
 The native event loop is the sole owner of:
@@ -95,6 +108,8 @@ The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller
 ## NGINX cross-check
 
 The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` is justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail.
+
+NGINX's developer documentation likewise describes read handlers as consuming available data until the socket reports `NGX_AGAIN`, then calling the read-event handling function to establish the next interest state. This supports the separation used here: readiness notification is not itself transport consumption or Servlet readiness.
 
 NGINX is an event-architecture reference only; it does not define Servlet semantics.
 
