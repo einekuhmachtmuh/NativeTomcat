@@ -148,6 +148,10 @@ static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bo
 		errno = EINVAL;
 		return -1;
 	}
+	if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) {
+		errno = ECANCELED;
+		return -1;
+	}
 
 	struct nt_runtime_command *command = calloc(1, sizeof(*command));
 	if (command == NULL) {
@@ -160,6 +164,12 @@ static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bo
 	if (pthread_mutex_lock(&runtime->command_mutex) != 0) {
 		free(command);
 		errno = EBUSY;
+		return -1;
+	}
+	if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) {
+		pthread_mutex_unlock(&runtime->command_mutex);
+		free(command);
+		errno = ECANCELED;
 		return -1;
 	}
 	if (runtime->command_tail == NULL) {
@@ -187,19 +197,57 @@ static struct nt_runtime_command *nt_runtime_take_commands(nt_runtime_t *runtime
 	return commands;
 }
 
+static void nt_runtime_free_commands(struct nt_runtime_command *commands) {
+	while (commands != NULL) {
+		struct nt_runtime_command *next = commands->next;
+		free(commands);
+		commands = next;
+	}
+}
+
 static void nt_runtime_process_commands(nt_runtime_t *runtime) {
-	struct nt_runtime_command *command = nt_runtime_take_commands(runtime);
+	struct nt_runtime_command *commands = nt_runtime_take_commands(runtime);
+	struct nt_runtime_command *effective_head = NULL;
+	struct nt_runtime_command *effective_tail = NULL;
+
+	while (commands != NULL) {
+		struct nt_runtime_command *command = commands;
+		commands = commands->next;
+		command->next = NULL;
+
+		struct nt_runtime_command *existing = effective_head;
+		while (existing != NULL && existing->handle != command->handle) {
+			existing = existing->next;
+		}
+		if (existing == NULL) {
+			if (effective_tail == NULL) {
+				effective_head = command;
+			} else {
+				effective_tail->next = command;
+			}
+			effective_tail = command;
+		} else if (command->close) {
+			existing->close = true;
+			existing->want_write = false;
+		} else if (!existing->close) {
+			existing->want_write = command->want_write;
+		}
+		free(command);
+	}
+
+	struct nt_runtime_command *command = effective_head;
 	while (command != NULL) {
 		struct nt_runtime_command *next = command->next;
 		nt_connection_t *connection = nt_runtime_find_connection(runtime, command->handle);
-		if (connection != NULL) {
+		if (connection != NULL && nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE) {
 			if (command->close) {
-				if (nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE) {
-					epoll_ctl(runtime->epoll_fd, EPOLL_CTL_DEL, nt_connection_get_fd(connection), NULL);
-					nt_connection_close(connection);
+				if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_DEL, nt_connection_get_fd(connection), NULL) == -1 &&
+						errno != ENOENT && errno != EBADF) {
+					/* The connection is still closed below; epoll cleanup is best effort. */
 				}
-			} else if (nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE) {
-				nt_runtime_rearm_connection(runtime, connection, command->want_write);
+				nt_connection_close(connection);
+			} else {
+				(void)nt_runtime_rearm_connection(runtime, connection, command->want_write);
 			}
 		}
 		free(command);
@@ -208,12 +256,7 @@ static void nt_runtime_process_commands(nt_runtime_t *runtime) {
 }
 
 static void nt_runtime_discard_commands(nt_runtime_t *runtime) {
-	struct nt_runtime_command *command = nt_runtime_take_commands(runtime);
-	while (command != NULL) {
-		struct nt_runtime_command *next = command->next;
-		free(command);
-		command = next;
-	}
+	nt_runtime_free_commands(nt_runtime_take_commands(runtime));
 }
 
 static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
