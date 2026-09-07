@@ -245,10 +245,6 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 	{
 		getEndpoint().connections.remove(getSocket());
 
-		synchronized (interestLock) {
-			interestOps = 0;
-		}
-
 		synchronized (readLock) {
 			readBlocking = false;
 			readLock.notifyAll();
@@ -256,6 +252,9 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 		synchronized (writeLock) {
 			writeBlocking = false;
 			writeLock.notifyAll();
+		}
+		synchronized (interestLock) {
+			interestOps = 0;
 		}
 
 		NativeTransport.close(getSocket());
