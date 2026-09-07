@@ -1,7 +1,6 @@
 package org.apache.tomcat.util.net;
 
 import java.io.IOException;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
