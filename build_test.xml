@@ -11,6 +11,7 @@
 	<property name="native.compiler" value="gcc"/>
 	<property name="java.home" value="${java.home}"/>
 	<property name="bnd.jar" value="${env.BND_JAR}"/>
+	<property name="servlet.api.jar" value="${env.SERVLET_API_JAR}"/>
 
 	<target name="init">
 		<mkdir dir="${java.classes}"/>
@@ -21,6 +22,11 @@
 	<target name="verify-bnd-dependency" depends="init">
 		<available file="${bnd.jar}" property="bnd.present"/>
 		<fail unless="bnd.present" message="Missing bnd dependency for pinned LogFactory.java. Set BND_JAR or pass -Dbnd.jar=/path/to/biz.aQute.bnd-*.jar. Do not create a local annotation stub or modify the pinned source."/>
+	</target>
+
+	<target name="verify-servlet-api-dependency" depends="init">
+		<available file="${servlet.api.jar}" property="servlet.api.present"/>
+		<fail unless="servlet.api.present" message="Missing Jakarta Servlet 6.1 API dependency. Set SERVLET_API_JAR or pass -Dservlet.api.jar=/path/to/jakarta.servlet-api-6.1.x.jar."/>
 	</target>
 
 	<target name="verify-tomcat-source-slice" depends="init">
@@ -42,15 +48,17 @@
 		<fail unless="socket-processor.present" message="Missing SocketProcessorBase surface: org/apache/tomcat/util/net/SocketProcessorBase.java"/>
 	</target>
 
-	<target name="java-compile" depends="verify-tomcat-source-slice,verify-bnd-dependency">
+	<target name="java-compile" depends="verify-tomcat-source-slice,verify-bnd-dependency,verify-servlet-api-dependency">
 		<javac srcdir="${basedir}/java" destdir="${java.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
-			<classpath><pathelement location="${bnd.jar}"/></classpath>
+			<classpath><pathelement location="${bnd.jar}"/><pathelement location="${servlet.api.jar}"/></classpath>
 			<include name="org/apache/tomcat/nativebootstrap/*.java"/>
 			<include name="org/apache/coyote/**/*.java"/>
 			<include name="org/apache/tomcat/util/buf/*.java"/>
 			<include name="org/apache/juli/logging/*.java"/>
 			<include name="org/apache/tomcat/util/res/*.java"/>
 			<include name="org/apache/tomcat/util/net/**/*.java"/>
+			<exclude name="org/apache/tomcat/util/net/openssl/panama/**/*.java"/>
+			<exclude name="org/apache/tomcat/util/openssl/**/*.java"/>
 			<include name="org/apache/tomcat/util/net/NativeEndpoint.java"/>
 			<include name="org/apache/coyote/http11/NativeHttp11Protocol.java"/>
 		</javac>
@@ -58,13 +66,15 @@
 
 	<target name="java-unit-test" depends="java-compile">
 		<javac srcdir="${basedir}/java" destdir="${java.test.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
-			<classpath><pathelement location="${bnd.jar}"/></classpath>
+			<classpath><pathelement location="${bnd.jar}"/><pathelement location="${servlet.api.jar}"/></classpath>
 			<include name="org/apache/tomcat/nativebootstrap/*.java"/>
 			<include name="org/apache/coyote/**/*.java"/>
 			<include name="org/apache/tomcat/util/buf/*.java"/>
 			<include name="org/apache/juli/logging/*.java"/>
 			<include name="org/apache/tomcat/util/res/*.java"/>
 			<include name="org/apache/tomcat/util/net/**/*.java"/>
+			<exclude name="org/apache/tomcat/util/net/openssl/panama/**/*.java"/>
+			<exclude name="org/apache/tomcat/util/openssl/**/*.java"/>
 			<include name="org/apache/tomcat/util/net/NativeEndpoint.java"/>
 			<include name="org/apache/coyote/http11/NativeHttp11Protocol.java"/>
 		</javac>
@@ -81,15 +91,17 @@
 
 	<target name="socket-wrapper-surface-test" depends="java-compile">
 		<javac srcdir="${basedir}/java" destdir="${java.test.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
-			<classpath><pathelement location="${bnd.jar}"/></classpath>
+			<classpath><pathelement location="${bnd.jar}"/><pathelement location="${servlet.api.jar}"/></classpath>
 			<include name="org/apache/tomcat/nativebootstrap/SocketWrapperSurfaceTest.java"/>
 			<include name="org/apache/tomcat/util/buf/*.java"/>
 			<include name="org/apache/juli/logging/*.java"/>
 			<include name="org/apache/tomcat/util/res/*.java"/>
 			<include name="org/apache/tomcat/util/net/**/*.java"/>
+			<exclude name="org/apache/tomcat/util/net/openssl/panama/**/*.java"/>
+			<exclude name="org/apache/tomcat/util/openssl/**/*.java"/>
 			<include name="org/apache/tomcat/util/net/NativeEndpoint.java"/>
 		</javac>
-		<java classname="org.apache.tomcat.nativebootstrap.SocketWrapperSurfaceTest" fork="true" failonerror="true"><classpath><pathelement location="${java.test.classes}"/></classpath></java>
+		<java classname="org.apache.tomcat.nativebootstrap.SocketWrapperSurfaceTest" fork="true" failonerror="true"><classpath><pathelement location="${java.test.classes}"/><pathelement location="${servlet.api.jar}"/></classpath></java>
 	</target>
 
 	<target name="native-jvm-dispatch-test" depends="init">

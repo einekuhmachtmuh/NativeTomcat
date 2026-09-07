@@ -20,6 +20,8 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 	private final Executor executor;
 	private final Object readLock;
 	private final Object writeLock;
+	private volatile long lastRead = System.currentTimeMillis();
+	private volatile long lastWrite = lastRead;
 	private volatile boolean readBlocking;
 	private volatile boolean writeBlocking;
 	private volatile ApplicationBufferHandler appReadBufHandler;
@@ -83,6 +85,42 @@ public final class NativeSocketWrapper extends SocketWrapperBase<Long> {
 
 		int n = fillReadBuffer(false);
 		return n > 0;
+	}
+
+	/**
+	 * Updates the last successful transport-read timestamp.
+	 */
+	public void updateLastRead()
+	{
+		lastRead = System.currentTimeMillis();
+	}
+
+	/**
+	 * Returns the last successful transport-read timestamp.
+	 *
+	 * @return Time in milliseconds
+	 */
+	public long getLastRead()
+	{
+		return lastRead;
+	}
+
+	/**
+	 * Updates the last successful transport-write timestamp.
+	 */
+	public void updateLastWrite()
+	{
+		lastWrite = System.currentTimeMillis();
+	}
+
+	/**
+	 * Returns the last successful transport-write timestamp.
+	 *
+	 * @return Time in milliseconds
+	 */
+	public long getLastWrite()
+	{
+		return lastWrite;
 	}
 
 	@Override
