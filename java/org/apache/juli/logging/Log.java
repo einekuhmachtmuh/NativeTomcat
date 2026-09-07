@@ -256,7 +256,7 @@ public interface Log {
      * Log an error with fatal log level.
      * </p>
      *
-     * @param message log this cause
+     * @param message log this message
      * @param t       log this cause
      */
     void fatal(Object message, Throwable t);
