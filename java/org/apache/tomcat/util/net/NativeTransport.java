@@ -9,14 +9,15 @@ import java.nio.ByteBuffer;
  */
 final class NativeTransport {
 
-    private NativeTransport() {
-    }
+	private NativeTransport()
+	{
+	}
 
-    static native int read(long handle, ByteBuffer buffer) throws IOException;
+	static native int read(long handle, ByteBuffer buffer) throws IOException;
 
-    static native int write(long handle, ByteBuffer buffer) throws IOException;
+	static native int write(long handle, ByteBuffer buffer) throws IOException;
 
-    static native void rearm(long handle, boolean wantWrite) throws IOException;
+	static native void rearm(long handle, int interestMask) throws IOException;
 
-    static native void close(long handle);
+	static native void close(long handle);
 }
