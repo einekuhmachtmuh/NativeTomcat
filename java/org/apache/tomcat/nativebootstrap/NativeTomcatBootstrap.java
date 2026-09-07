@@ -4,19 +4,21 @@ import java.lang.reflect.Method;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 
+import org.apache.coyote.http11.NativeHttp11Protocol;
+import org.apache.tomcat.util.net.NativeEndpoint;
+
 /**
  * Java-side lifecycle bridge invoked by the NativeTomcat C process entry point.
  *
  * <p>The current repository intentionally keeps this bridge free of compile-time
- * dependencies on Tomcat implementation classes. Tomcat's Java source is being
- * brought into this repository incrementally so that those classes can be
- * modified and compiled as part of the NativeTomcat build instead of treating
- * an external Tomcat build as an immutable binary dependency.</p>
+ * dependencies on most Tomcat implementation classes. The native endpoint and
+ * protocol are the explicit NativeTomcat integration boundary.</p>
  */
 public final class NativeTomcatBootstrap {
 
     private static Object bootstrap;
     private static NativeEventDispatcher eventDispatcher;
+    private static NativeEndpoint nativeEndpoint;
 
     private NativeTomcatBootstrap() {
     }
@@ -47,10 +49,15 @@ public final class NativeTomcatBootstrap {
                 new Object[] { args == null ? new String[0] : args });
         invoke(instance, "start", new Class<?>[0], new Object[0]);
         try {
-            Executor executor = resolveTomcatExecutor(instance, bootstrapClass);
+            nativeEndpoint = resolveNativeEndpoint(instance, bootstrapClass);
+            Executor executor = nativeEndpoint.getExecutor();
+            if (executor == null) {
+                throw new IllegalStateException("NativeEndpoint has no Tomcat Executor after Bootstrap.start()");
+            }
             eventDispatcher = new NativeEventDispatcher(executor, NativeTomcatBootstrap::processNativeEvent);
             bootstrap = instance;
         } catch (Exception e) {
+            nativeEndpoint = null;
             try {
                 invoke(instance, "stop", new Class<?>[0], new Object[0]);
             } catch (Exception stopFailure) {
@@ -73,6 +80,7 @@ public final class NativeTomcatBootstrap {
         if (dispatcher != null) {
             dispatcher.stop();
         }
+        nativeEndpoint = null;
 
         Object instance = bootstrap;
         try {
@@ -92,12 +100,14 @@ public final class NativeTomcatBootstrap {
     }
 
     private static void processNativeEvent(long connectionHandle, int events) {
-        // This task is already running under Tomcat's Executor ownership. The
-        // native transport-to-SocketWrapper hand-off will invoke the real
-        // SocketProcessor-compatible processing layer from here.
+        NativeEndpoint endpoint = nativeEndpoint;
+        if (endpoint == null) {
+            return;
+        }
+        endpoint.processNativeEvent(connectionHandle, events);
     }
 
-    private static Executor resolveTomcatExecutor(Object instance, Class<?> bootstrapClass) throws Exception {
+    private static NativeEndpoint resolveNativeEndpoint(Object instance, Class<?> bootstrapClass) throws Exception {
         Method getServer = bootstrapClass.getDeclaredMethod("getServer");
         getServer.setAccessible(true);
         Object server = getServer.invoke(instance);
@@ -106,20 +116,25 @@ public final class NativeTomcatBootstrap {
         }
 
         Object[] services = (Object[]) invoke(server, "findServices", new Class<?>[0], new Object[0]);
+        NativeEndpoint result = null;
         for (Object service : services) {
             Object[] connectors = (Object[]) invoke(service, "findConnectors", new Class<?>[0], new Object[0]);
             for (Object connector : connectors) {
                 Object protocolHandler = invoke(connector, "getProtocolHandler", new Class<?>[0], new Object[0]);
-                if (protocolHandler == null) {
-                    continue;
-                }
-                Object executor = invoke(protocolHandler, "getExecutor", new Class<?>[0], new Object[0]);
-                if (executor instanceof Executor) {
-                    return (Executor) executor;
+                if (protocolHandler instanceof NativeHttp11Protocol) {
+                    if (result != null) {
+                        throw new IllegalStateException("Multiple NativeHttp11Protocol connectors are not yet supported");
+                    }
+                    result = ((NativeHttp11Protocol) protocolHandler).getNativeEndpoint();
                 }
             }
         }
-        throw new IllegalStateException("No Tomcat connector Executor is available");
+        if (result == null) {
+            throw new IllegalStateException(
+                    "No NativeHttp11Protocol connector is configured; configure the connector to use " +
+                    NativeHttp11Protocol.class.getName());
+        }
+        return result;
     }
 
     private static Object invoke(Object target, String name, Class<?>[] parameterTypes, Object[] args) throws Exception {
