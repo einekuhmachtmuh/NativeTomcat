@@ -43,7 +43,8 @@ struct nt_runtime {
 	int wake_token;
 };
 
-static int nt_set_nonblocking(int fd) {
+static int nt_set_nonblocking(int fd)
+{
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags == -1) {
 		return -1;
@@ -51,7 +52,8 @@ static int nt_set_nonblocking(int fd) {
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-static int nt_create_listener(const nt_runtime_config_t *config) {
+static int nt_create_listener(const nt_runtime_config_t *config)
+{
 	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd == -1) {
 		return -1;
@@ -82,7 +84,8 @@ static int nt_create_listener(const nt_runtime_config_t *config) {
 	return fd;
 }
 
-static int nt_runtime_add_connection(nt_runtime_t *runtime, nt_connection_t *connection) {
+static int nt_runtime_add_connection(nt_runtime_t *runtime, nt_connection_t *connection)
+{
 	if (pthread_mutex_lock(&runtime->connection_mutex) != 0) {
 		errno = EBUSY;
 		return -1;
@@ -97,7 +100,7 @@ static int nt_runtime_add_connection(nt_runtime_t *runtime, nt_connection_t *con
 			status = -1;
 		} else {
 			nt_connection_t **connections = realloc(
-					runtime->connections, new_capacity * sizeof(*runtime->connections));
+				runtime->connections, new_capacity * sizeof(*runtime->connections));
 			if (connections == NULL) {
 				status = -1;
 			} else {
@@ -114,7 +117,8 @@ static int nt_runtime_add_connection(nt_runtime_t *runtime, nt_connection_t *con
 	return status;
 }
 
-static void nt_runtime_close_connections(nt_runtime_t *runtime) {
+static void nt_runtime_close_connections(nt_runtime_t *runtime)
+{
 	if (pthread_mutex_lock(&runtime->connection_mutex) != 0) {
 		return;
 	}
@@ -124,7 +128,8 @@ static void nt_runtime_close_connections(nt_runtime_t *runtime) {
 	pthread_mutex_unlock(&runtime->connection_mutex);
 }
 
-static void nt_runtime_destroy_connections(nt_runtime_t *runtime) {
+static void nt_runtime_destroy_connections(nt_runtime_t *runtime)
+{
 	for (size_t i = 0; i < runtime->connection_count; ++i) {
 		nt_connection_destroy(runtime->connections[i]);
 	}
@@ -134,7 +139,8 @@ static void nt_runtime_destroy_connections(nt_runtime_t *runtime) {
 	runtime->connection_capacity = 0;
 }
 
-static int nt_runtime_wake(nt_runtime_t *runtime) {
+static int nt_runtime_wake(nt_runtime_t *runtime)
+{
 	uint64_t value = 1;
 	ssize_t result = write(runtime->wake_fd, &value, sizeof(value));
 	if (result == (ssize_t) sizeof(value) || (result == -1 && errno == EAGAIN)) {
@@ -143,7 +149,8 @@ static int nt_runtime_wake(nt_runtime_t *runtime) {
 	return -1;
 }
 
-static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bool want_write, bool close) {
+static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bool want_write, bool close)
+{
 	if (runtime == NULL || handle == 0 || (want_write && close)) {
 		errno = EINVAL;
 		return -1;
@@ -186,7 +193,8 @@ static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bo
 	return 0;
 }
 
-static struct nt_runtime_command *nt_runtime_take_commands(nt_runtime_t *runtime) {
+static struct nt_runtime_command *nt_runtime_take_commands(nt_runtime_t *runtime)
+{
 	if (pthread_mutex_lock(&runtime->command_mutex) != 0) {
 		return NULL;
 	}
@@ -197,7 +205,8 @@ static struct nt_runtime_command *nt_runtime_take_commands(nt_runtime_t *runtime
 	return commands;
 }
 
-static void nt_runtime_free_commands(struct nt_runtime_command *commands) {
+static void nt_runtime_free_commands(struct nt_runtime_command *commands)
+{
 	while (commands != NULL) {
 		struct nt_runtime_command *next = commands->next;
 		free(commands);
@@ -205,7 +214,8 @@ static void nt_runtime_free_commands(struct nt_runtime_command *commands) {
 	}
 }
 
-static void nt_runtime_process_commands(nt_runtime_t *runtime) {
+static void nt_runtime_process_commands(nt_runtime_t *runtime)
+{
 	struct nt_runtime_command *commands = nt_runtime_take_commands(runtime);
 	struct nt_runtime_command *effective_head = NULL;
 	struct nt_runtime_command *effective_tail = NULL;
@@ -255,11 +265,13 @@ static void nt_runtime_process_commands(nt_runtime_t *runtime) {
 	}
 }
 
-static void nt_runtime_discard_commands(nt_runtime_t *runtime) {
+static void nt_runtime_discard_commands(nt_runtime_t *runtime)
+{
 	nt_runtime_free_commands(nt_runtime_take_commands(runtime));
 }
 
-static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
+static void nt_runtime_accept_connections(nt_runtime_t *runtime)
+{
 	for (;;) {
 		int client = accept4(runtime->listener_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 		if (client == -1) {
@@ -281,7 +293,7 @@ static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
 		struct epoll_event event;
 		memset(&event, 0, sizeof(event));
 		event.events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
-		event.data.ptr = connection;
+		event.data.u64 = nt_connection_get_handle(connection);
 		if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, client, &event) == -1) {
 			nt_connection_destroy(connection);
 			continue;
@@ -295,7 +307,8 @@ static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
 	}
 }
 
-int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
+int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config)
+{
 	if (runtime == NULL || config == NULL || config->max_events <= 0 || config->backlog <= 0) {
 		errno = EINVAL;
 		return -1;
@@ -380,7 +393,8 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	return 0;
 }
 
-int nt_runtime_get_port(const nt_runtime_t *runtime) {
+int nt_runtime_get_port(const nt_runtime_t *runtime)
+{
 	if (runtime == NULL || runtime->listener_fd == -1) {
 		errno = EINVAL;
 		return -1;
@@ -395,7 +409,8 @@ int nt_runtime_get_port(const nt_runtime_t *runtime) {
 	return (int) ntohs(address.sin_port);
 }
 
-nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t handle) {
+nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t handle)
+{
 	if (runtime == NULL || handle == 0) {
 		errno = EINVAL;
 		return NULL;
@@ -422,7 +437,8 @@ nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t hand
 	return result;
 }
 
-int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write) {
+int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write)
+{
 	if (runtime == NULL || connection == NULL || nt_connection_get_runtime(connection) != runtime) {
 		errno = EINVAL;
 		return -1;
@@ -438,19 +454,22 @@ int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connecti
 	if (want_write) {
 		event.events |= EPOLLOUT;
 	}
-	event.data.ptr = connection;
+	event.data.u64 = nt_connection_get_handle(connection);
 	return epoll_ctl(runtime->epoll_fd, EPOLL_CTL_MOD, nt_connection_get_fd(connection), &event);
 }
 
-int nt_runtime_request_rearm(nt_runtime_t *runtime, uint64_t handle, bool want_write) {
+int nt_runtime_request_rearm(nt_runtime_t *runtime, uint64_t handle, bool want_write)
+{
 	return nt_runtime_enqueue_command(runtime, handle, want_write, false);
 }
 
-int nt_runtime_request_close(nt_runtime_t *runtime, uint64_t handle) {
+int nt_runtime_request_close(nt_runtime_t *runtime, uint64_t handle)
+{
 	return nt_runtime_enqueue_command(runtime, handle, false, true);
 }
 
-int nt_runtime_run(nt_runtime_t *runtime) {
+int nt_runtime_run(nt_runtime_t *runtime)
+{
 	if (runtime == NULL) {
 		errno = EINVAL;
 		return -1;
@@ -485,8 +504,9 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 				continue;
 			}
 
-			nt_connection_t *connection = events[i].data.ptr;
-			if (nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
+			uint64_t handle = events[i].data.u64;
+			nt_connection_t *connection = nt_runtime_find_connection(runtime, handle);
+			if (connection == NULL || nt_connection_get_state(connection) != NT_CONNECTION_ACTIVE) {
 				continue;
 			}
 
@@ -518,7 +538,8 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 	return 0;
 }
 
-void nt_runtime_stop(nt_runtime_t *runtime) {
+void nt_runtime_stop(nt_runtime_t *runtime)
+{
 	if (runtime != NULL) {
 		atomic_store_explicit(&runtime->stop_requested, true, memory_order_release);
 		if (runtime->wake_fd != -1) {
@@ -527,7 +548,8 @@ void nt_runtime_stop(nt_runtime_t *runtime) {
 	}
 }
 
-void nt_runtime_destroy(nt_runtime_t *runtime) {
+void nt_runtime_destroy(nt_runtime_t *runtime)
+{
 	if (runtime == NULL) {
 		return;
 	}
