@@ -1,6 +1,7 @@
 package org.apache.tomcat.util.net;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
@@ -28,10 +29,10 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
      * Create a native endpoint. The native runtime remains the accept owner.
      */
     public NativeEndpoint() {
-        // Keep AbstractEndpoint's lifecycle contract satisfied for code paths
-        // that expect an Acceptor object to exist. This acceptor is never
-        // started; native code owns accept.
-        acceptor = new Acceptor<>(this);
+        // Do not create an Acceptor here. NioEndpoint creates and starts its
+        // Acceptor as part of its own startInternal() implementation. Native
+        // accept is owned exclusively by nt_runtime, so this endpoint must not
+        // create a second accept owner.
     }
 
     /**
@@ -125,9 +126,6 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
         if (running) {
             running = false;
             paused = true;
-            if (acceptor != null) {
-                acceptor.stopMillis(0);
-            }
             shutdownExecutor();
             if (processorCache != null) {
                 processorCache.clear();
@@ -139,6 +137,14 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
     @Override
     protected Log getLog() {
         return log;
+    }
+
+    @Override
+    protected InetSocketAddress getLocalAddress() throws IOException {
+        // The listening socket is owned by nt_runtime. Until the native
+        // listener-address bridge is added, there is no Java NetworkChannel
+        // from which AbstractEndpoint can obtain an address.
+        return null;
     }
 
     @Override
