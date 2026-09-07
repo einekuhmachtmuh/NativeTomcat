@@ -30,6 +30,14 @@ Each `nt_connection_t` now receives a monotonically allocated non-zero `uint64_t
 
 The runtime ownership table therefore supplies the lookup owner while the connection object remains alive for the runtime lifetime.
 
+## Registry concurrency gate
+
+The runtime connection table is now protected by a `pthread_mutex_t` for mutation and handle lookup. This is intentionally a small synchronization boundary: it protects the `connections` array and its possible `realloc()` from concurrent Java-worker lookup without introducing a general-purpose global handle map.
+
+`nt_runtime_find_connection()` returns a borrowed `nt_connection_t *`; it does not transfer ownership and does not itself pin the object beyond the lookup. Its safe use therefore depends on the existing lifecycle rule: the runtime must not destroy connection objects until Java-side event processing has drained. `main.c` enforces this ordering by stopping/draining the JVM before `nt_runtime_destroy()`.
+
+This mutex is not an event-loop ownership mechanism. `epoll_ctl()` and rearming remain native event-loop responsibilities.
+
 ## I/O correction made at the same gate
 
 `nt_connection_read()` and `nt_connection_write()` now retry `EINTR` rather than classifying it as `WOULD_BLOCK`. `EAGAIN`/`EWOULDBLOCK` remain `WOULD_BLOCK`; EOF remains a distinct result; fatal transport errors retain the existing close behavior.
@@ -38,9 +46,11 @@ This is necessary because `WOULD_BLOCK` has event-interest implications and must
 
 ## Test coverage added
 
-`native/tests/nt_runtime_test.c` now verifies that every callback receives a non-zero handle and that the runtime resolves that handle back to the same connection object.
+`native/tests/nt_runtime_test.c` verifies that every callback receives a non-zero handle and that the runtime resolves that handle back to the same connection object.
 
 The existing echo/rearm/EOF path remains in the test.
+
+The registry mutex itself is an implementation change and still requires compilation/runtime verification in the current environment before this gate can be marked tested.
 
 ## Tomcat cross-check
 
@@ -52,7 +62,7 @@ The next gate must connect the resolved native connection to a real `NativeSocke
 
 NGINX separates event registration/polling from higher-level event handling. This implementation follows the same architectural separation without copying NGINX APIs: the handle identifies the connection, while the native runtime remains the owner of epoll registration and lifetime.
 
-A Java worker must not receive ownership of the epoll registration merely because it receives the handle.
+A Java worker must not receive ownership of the epoll registration merely because it receives the handle. The registry mutex likewise protects identity-table memory access only; it does not authorize Java to perform `epoll_ctl()`.
 
 ## Explicit non-goals
 
@@ -77,8 +87,9 @@ Those remain subsequent gates and must be implemented only after their ownership
 
 - stable native identity: **code implemented**;
 - runtime-owned handle lookup: **code implemented**;
+- registry synchronization: **code implemented; runtime verification pending**;
 - EINTR handling correction: **code implemented**;
-- source cross-check against pinned Tomcat/Nginx: **source-verified**;
+- source cross-check against pinned Tomcat/NGINX: **source-verified**;
 - native unit/runtime test: **not executed in the current environment**;
 - Java/Tomcat integration: **not implemented**;
 - Servlet/TCK: **not reached**;
