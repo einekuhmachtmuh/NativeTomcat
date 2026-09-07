@@ -86,11 +86,11 @@ This follows the pinned Tomcat NIO separation: `NioEndpoint.Poller.processKey()`
 
 ## Tomcat cross-check
 
-The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll. citeturn1search1
+The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll.
 
 ## NGINX cross-check
 
-The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` is justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail. citeturn0search0turn0search1
+The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` is justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail.
 
 NGINX is an event-architecture reference only; it does not define Servlet semantics.
 
