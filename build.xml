@@ -17,22 +17,10 @@
 -->
 <!-- Mandatory rule: before migrating a Tomcat Java source file, check whether the exact path already exists under java/. -->
 <project name="NativeTomcat" default="java-compile" basedir=".">
-
-	<!--
-		MANDATORY SOURCE-MIGRATION RULE: any Tomcat Java source materially involved in
-		implementation/planning/verification must first be copied to java/ at its exact
-		original package path, and this build file must then be updated to account for it.
-	-->
-	<!--
-		FORMAL BUILD: build.xml is the NativeTomcat formal build entry point.
-		BUILD VERIFICATION: build_test.xml is reserved for intermediate,
-		component-level verification while the Tomcat Java source tree is being
-		migrated and modified. build.xml must not depend on build_test.xml.
-		The pinned upstream Tomcat build remains an explicit compatibility gate
-		until the migrated NativeTomcat Java tree is complete.
-	-->
-	<property name="java.home" value="${java.home}" />
+	<!-- MANDATORY SOURCE-MIGRATION RULE: any Tomcat Java source materially involved in implementation/planning/verification must first be copied to java/ at its exact original package path, and this build file must then be updated to account for it. -->
+	<!-- FORMAL BUILD: build.xml is the NativeTomcat formal build entry point. build_test.xml is reserved for intermediate component-level verification. -->
 	<property environment="env" />
+	<property name="java.home" value="${java.home}" />
 	<property name="java.source" value="17" />
 	<property name="java.target" value="17" />
 	<property name="native.java.classes" value="${basedir}/output/native-java/classes" />
@@ -42,29 +30,24 @@
 	<property name="tomcat.source.dir" value="${basedir}/upstream/tomcat" />
 	<property name="tomcat.build.file" value="${tomcat.source.dir}/build.xml" />
 	<property name="tomcat.expected.commit" value="cbe6e15ee81e2fc6232954292a80cca5d1e84009" />
+	<!-- Pinned LogFactory.java imports bnd's ServiceConsumer annotation. No local stub or source modification is permitted. -->
+	<property name="bnd.jar" value="${env.BND_JAR}" />
 
-	<path id="native.java.sources">
-		<pathelement location="${basedir}/java" />
-	</path>
+	<target name="init"><mkdir dir="${native.java.classes}" /></target>
 
-	<target name="init">
-		<mkdir dir="${native.java.classes}" />
+	<target name="verify-bnd-dependency" depends="init" description="Verify the external bnd dependency required by migrated JULI sources">
+		<available file="${bnd.jar}" property="bnd.present" />
+		<fail unless="bnd.present" message="Missing bnd dependency for pinned LogFactory.java. Set BND_JAR or pass -Dbnd.jar=/path/to/biz.aQute.bnd-*.jar. Do not create a local annotation stub or modify the pinned source." />
 	</target>
 
-	<target name="java-compile" depends="init" description="Formal build of the currently migrated NativeTomcat Java source slice">
-		<javac srcdir="${basedir}/java"
-			destdir="${native.java.classes}"
-			release="${java.source}"
-			includeantruntime="false"
-			debug="true"
-			encoding="UTF-8">
-			<!-- The formal tree is intentionally narrowed until the migrated Tomcat
-			     dependency closure is complete. build_test.xml remains the broader
-			     intermediate verification entry point. -->
+	<target name="java-compile" depends="init,verify-bnd-dependency" description="Formal build of the currently migrated NativeTomcat Java source slice">
+		<javac srcdir="${basedir}/java" destdir="${native.java.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
+			<classpath><pathelement location="${bnd.jar}" /></classpath>
 			<include name="org/apache/tomcat/nativebootstrap/*.java" />
 			<include name="org/apache/tomcat/util/*.java" />
 			<include name="org/apache/tomcat/util/res/*.java" />
-			<include name="org/apache/tomcat/util/buf/ByteBufferHolder.java" />
+			<include name="org/apache/tomcat/util/buf/*.java" />
+			<include name="org/apache/juli/logging/*.java" />
 			<include name="org/apache/tomcat/util/net/*.java" />
 		</javac>
 	</target>
@@ -72,112 +55,21 @@
 	<target name="verify-tomcat-source" description="Verify the initialized Tomcat submodule is pinned to the expected commit">
 		<available file="${tomcat.build.file}" property="tomcat.build.available" />
 		<fail unless="tomcat.build.available" message="upstream/tomcat/build.xml is missing; initialize the pinned Tomcat submodule before invoking the upstream Ant build." />
-		<exec executable="git" dir="${tomcat.source.dir}" outputproperty="tomcat.actual.commit" failifexecutionfails="true" failonerror="true">
-			<arg value="rev-parse" />
-			<arg value="HEAD" />
-		</exec>
-		<condition property="tomcat.commit.verified">
-			<matches string="${tomcat.actual.commit}" pattern="^${tomcat.expected.commit}\s*$" />
-		</condition>
+		<exec executable="git" dir="${tomcat.source.dir}" outputproperty="tomcat.actual.commit" failifexecutionfails="true" failonerror="true"><arg value="rev-parse" /><arg value="HEAD" /></exec>
+		<condition property="tomcat.commit.verified"><matches string="${tomcat.actual.commit}" pattern="^${tomcat.expected.commit}\s*$" /></condition>
 		<fail unless="tomcat.commit.verified" message="Tomcat submodule commit mismatch: expected ${tomcat.expected.commit}, actual ${tomcat.actual.commit}. Refusing to invoke the upstream Ant build." />
 	</target>
+	<target name="tomcat-compile" depends="verify-tomcat-source"><ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="compile" inheritAll="false" inheritRefs="false" /></target>
+	<target name="native-java-compile" depends="java-compile" />
+	<target name="tomcat-deploy" depends="verify-tomcat-source"><ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="deploy" inheritAll="false" inheritRefs="false" /></target>
+	<target name="native-runtime-prepare" depends="tomcat-deploy,native-java-compile" />
 
-	<target name="tomcat-compile" depends="verify-tomcat-source" description="Run the pinned upstream Tomcat compile target through its own Ant build">
-		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="compile" inheritAll="false" inheritRefs="false" />
-	</target>
+	<target name="native-test" depends="init"><mkdir dir="${native.build.dir}" /><exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true"><arg value="-std=gnu11" /><arg value="-D_GNU_SOURCE" /><arg value="-Wall" /><arg value="-Wextra" /><arg value="-Wpedantic" /><arg value="-I${basedir}/native/include" /><arg value="-pthread" /><arg value="-o" /><arg value="${native.build.dir}/nt_runtime_test" /><arg value="${basedir}/native/tests/nt_runtime_test.c" /><arg value="${basedir}/native/src/nt_runtime.c" /><arg value="${basedir}/native/src/nt_connection.c" /></exec><exec executable="${native.build.dir}/nt_runtime_test" failifexecutionfails="true" failonerror="true" /></target>
 
-	<target name="native-java-compile" depends="java-compile" description="Formal-build alias for the repository-owned Java tree">
-	</target>
+	<target name="native-event-dispatcher-test" depends="init"><mkdir dir="${basedir}/output/native-java/test-classes" /><javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8"><include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java" /><include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherUnitTest.java" /></javac><java classname="org.apache.tomcat.nativebootstrap.NativeEventDispatcherUnitTest" fork="true" failonerror="true"><classpath><pathelement location="${basedir}/output/native-java/test-classes" /></classpath></java></target>
 
-	<target name="tomcat-deploy" depends="verify-tomcat-source" description="Run the pinned upstream Tomcat deploy target to build a working Tomcat instance">
-		<ant antfile="${tomcat.build.file}" dir="${tomcat.source.dir}" target="deploy" inheritAll="false" inheritRefs="false" />
-	</target>
+	<target name="native-jvm-dispatch-test" depends="init"><mkdir dir="${native.build.dir}" /><mkdir dir="${basedir}/output/native-java/test-classes" /><javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8"><include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherTest.java" /></javac><exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true"><arg value="-std=gnu11" /><arg value="-D_GNU_SOURCE" /><arg value="-Wall" /><arg value="-Wextra" /><arg value="-Wpedantic" /><arg value="-Werror" /><arg value="-I${basedir}/native/include" /><arg value="-I${java.home}/include" /><arg value="-I${java.home}/include/linux" /><arg value="-pthread" /><arg value="-o" /><arg value="${native.build.dir}/nt_jvm_dispatch_test" /><arg value="${basedir}/native/tests/nt_jvm_dispatch_test.c" /><arg value="${basedir}/native/src/nt_jvm.c" /><arg value="-ldl" /></exec><exec executable="${native.build.dir}/nt_jvm_dispatch_test" failifexecutionfails="true" failonerror="true"><env key="NATIVETOMCAT_JAVA_TEST_CP" path="${basedir}/output/native-java/test-classes" /></exec></target>
 
-	<target name="native-runtime-prepare" depends="tomcat-deploy,native-java-compile" description="Build the pinned Tomcat runtime and NativeTomcat Java bridge">
-	</target>
-
-	<target name="native-test" depends="init" description="Compile and run the native event-runtime regression test">
-		<mkdir dir="${native.build.dir}" />
-		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
-			<arg value="-std=gnu11" />
-			<arg value="-D_GNU_SOURCE" />
-			<arg value="-Wall" />
-			<arg value="-Wextra" />
-			<arg value="-Wpedantic" />
-			<arg value="-I${basedir}/native/include" />
-			<arg value="-pthread" />
-			<arg value="-o" />
-			<arg value="${native.build.dir}/nt_runtime_test" />
-			<arg value="${basedir}/native/tests/nt_runtime_test.c" />
-			<arg value="${basedir}/native/src/nt_runtime.c" />
-			<arg value="${basedir}/native/src/nt_connection.c" />
-		</exec>
-		<exec executable="${native.build.dir}/nt_runtime_test" failifexecutionfails="true" failonerror="true" />
-	</target>
-
-	<target name="native-event-dispatcher-test" depends="init" description="Verify per-connection event serialization and coalescing">
-		<mkdir dir="${basedir}/output/native-java/test-classes" />
-		<javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8">
-			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcher.java" />
-			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherUnitTest.java" />
-		</javac>
-		<java classname="org.apache.tomcat.nativebootstrap.NativeEventDispatcherUnitTest" fork="true" failonerror="true">
-			<classpath><pathelement location="${basedir}/output/native-java/test-classes" /></classpath>
-		</java>
-	</target>
-
-	<target name="native-jvm-dispatch-test" depends="init" description="Verify JNI event dispatch attaches native threads and hands work to a Java Executor">
-		<mkdir dir="${native.build.dir}" />
-		<mkdir dir="${basedir}/output/native-java/test-classes" />
-		<javac srcdir="${basedir}/java" destdir="${basedir}/output/native-java/test-classes" includeantruntime="false" debug="true" encoding="UTF-8">
-			<include name="org/apache/tomcat/nativebootstrap/NativeEventDispatcherTest.java" />
-		</javac>
-		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
-			<arg value="-std=gnu11" />
-			<arg value="-D_GNU_SOURCE" />
-			<arg value="-Wall" />
-			<arg value="-Wextra" />
-			<arg value="-Wpedantic" />
-			<arg value="-I${basedir}/native/include" />
-			<arg value="-I${java.home}/include" />
-			<arg value="-I${java.home}/include/linux" />
-			<arg value="-pthread" />
-			<arg value="-o" />
-			<arg value="${native.build.dir}/nt_jvm_dispatch_test" />
-			<arg value="${basedir}/native/tests/nt_jvm_dispatch_test.c" />
-			<arg value="${basedir}/native/src/nt_jvm.c" />
-			<arg value="-ldl" />
-		</exec>
-		<exec executable="${native.build.dir}/nt_jvm_dispatch_test" failifexecutionfails="true" failonerror="true">
-			<env key="NATIVETOMCAT_JAVA_TEST_CP" path="${basedir}/output/native-java/test-classes" />
-		</exec>
-	</target>
-
-	<target name="native-compile" depends="init" description="Compile the existing Linux native sources into the NativeTomcat executable">
-		<mkdir dir="${native.build.dir}" />
-		<exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true">
-			<arg value="-std=gnu11" />
-			<arg value="-D_GNU_SOURCE" />
-			<arg value="-Wall" />
-			<arg value="-Wextra" />
-			<arg value="-Wpedantic" />
-			<arg value="-I${basedir}/native/include" />
-			<arg value="-I${java.home}/include" />
-			<arg value="-I${java.home}/include/linux" />
-			<arg value="-pthread" />
-			<arg value="-o" />
-			<arg value="${native.executable}" />
-			<arg value="${basedir}/native/src/main.c" />
-			<arg value="${basedir}/native/src/nt_jvm.c" />
-			<arg value="${basedir}/native/src/nt_runtime.c" />
-			<arg value="${basedir}/native/src/nt_connection.c" />
-			<arg value="-ldl" />
-		</exec>
-	</target>
-
-	<target name="clean">
-		<delete dir="${basedir}/output/native-java" />
-		<delete dir="${native.build.dir}" />
-	</target>
-
+	<target name="native-compile" depends="init"><mkdir dir="${native.build.dir}" /><exec executable="${native.compiler}" failifexecutionfails="true" failonerror="true"><arg value="-std=gnu11" /><arg value="-D_GNU_SOURCE" /><arg value="-Wall" /><arg value="-Wextra" /><arg value="-Wpedantic" /><arg value="-I${basedir}/native/include" /><arg value="-I${java.home}/include" /><arg value="-I${java.home}/include/linux" /><arg value="-pthread" /><arg value="-o" /><arg value="${native.executable}" /><arg value="${basedir}/native/src/main.c" /><arg value="${basedir}/native/src/nt_jvm.c" /><arg value="${basedir}/native/src/nt_runtime.c" /><arg value="${basedir}/native/src/nt_connection.c" /><arg value="-ldl" /></exec></target>
+	<target name="clean"><delete dir="${basedir}/output/native-java" /><delete dir="${native.build.dir}" /></target>
 </project>
