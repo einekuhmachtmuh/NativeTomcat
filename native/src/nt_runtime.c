@@ -17,6 +17,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+struct nt_runtime_command {
+	uint64_t handle;
+	bool want_write;
+	bool close;
+	struct nt_runtime_command *next;
+};
+
 struct nt_runtime {
 	int listener_fd;
 	int epoll_fd;
@@ -29,6 +36,9 @@ struct nt_runtime {
 	size_t connection_count;
 	size_t connection_capacity;
 	pthread_mutex_t connection_mutex;
+	pthread_mutex_t command_mutex;
+	struct nt_runtime_command *command_head;
+	struct nt_runtime_command *command_tail;
 	int listener_token;
 	int wake_token;
 };
@@ -124,6 +134,88 @@ static void nt_runtime_destroy_connections(nt_runtime_t *runtime) {
 	runtime->connection_capacity = 0;
 }
 
+static int nt_runtime_wake(nt_runtime_t *runtime) {
+	uint64_t value = 1;
+	ssize_t result = write(runtime->wake_fd, &value, sizeof(value));
+	if (result == (ssize_t) sizeof(value) || (result == -1 && errno == EAGAIN)) {
+		return 0;
+	}
+	return -1;
+}
+
+static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bool want_write, bool close) {
+	if (runtime == NULL || handle == 0 || (want_write && close)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct nt_runtime_command *command = calloc(1, sizeof(*command));
+	if (command == NULL) {
+		return -1;
+	}
+	command->handle = handle;
+	command->want_write = want_write;
+	command->close = close;
+
+	if (pthread_mutex_lock(&runtime->command_mutex) != 0) {
+		free(command);
+		errno = EBUSY;
+		return -1;
+	}
+	if (runtime->command_tail == NULL) {
+		runtime->command_head = command;
+	} else {
+		runtime->command_tail->next = command;
+	}
+	runtime->command_tail = command;
+	pthread_mutex_unlock(&runtime->command_mutex);
+
+	if (nt_runtime_wake(runtime) != 0) {
+		return -1;
+	}
+	return 0;
+}
+
+static struct nt_runtime_command *nt_runtime_take_commands(nt_runtime_t *runtime) {
+	if (pthread_mutex_lock(&runtime->command_mutex) != 0) {
+		return NULL;
+	}
+	struct nt_runtime_command *commands = runtime->command_head;
+	runtime->command_head = NULL;
+	runtime->command_tail = NULL;
+	pthread_mutex_unlock(&runtime->command_mutex);
+	return commands;
+}
+
+static void nt_runtime_process_commands(nt_runtime_t *runtime) {
+	struct nt_runtime_command *command = nt_runtime_take_commands(runtime);
+	while (command != NULL) {
+		struct nt_runtime_command *next = command->next;
+		nt_connection_t *connection = nt_runtime_find_connection(runtime, command->handle);
+		if (connection != NULL) {
+			if (command->close) {
+				if (nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE) {
+					epoll_ctl(runtime->epoll_fd, EPOLL_CTL_DEL, nt_connection_get_fd(connection), NULL);
+					nt_connection_close(connection);
+				}
+			} else if (nt_connection_get_state(connection) == NT_CONNECTION_ACTIVE) {
+				nt_runtime_rearm_connection(runtime, connection, command->want_write);
+			}
+		}
+		free(command);
+		command = next;
+	}
+}
+
+static void nt_runtime_discard_commands(nt_runtime_t *runtime) {
+	struct nt_runtime_command *command = nt_runtime_take_commands(runtime);
+	while (command != NULL) {
+		struct nt_runtime_command *next = command->next;
+		free(command);
+		command = next;
+	}
+}
+
 static void nt_runtime_accept_connections(nt_runtime_t *runtime) {
 	for (;;) {
 		int client = accept4(runtime->listener_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -179,13 +271,16 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->connection_handler_data = config->connection_handler_data;
 	atomic_init(&value->stop_requested, false);
 
-	if (pthread_mutex_init(&value->connection_mutex, NULL) != 0) {
+	if (pthread_mutex_init(&value->connection_mutex, NULL) != 0 ||
+			pthread_mutex_init(&value->command_mutex, NULL) != 0) {
+		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
 	}
 
 	value->listener_fd = nt_create_listener(config);
 	if (value->listener_fd == -1) {
+		pthread_mutex_destroy(&value->command_mutex);
 		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
@@ -194,6 +289,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (value->epoll_fd == -1) {
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->command_mutex);
 		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
@@ -203,6 +299,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	if (value->wake_fd == -1) {
 		close(value->epoll_fd);
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->command_mutex);
 		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
@@ -216,6 +313,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		close(value->wake_fd);
 		close(value->epoll_fd);
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->command_mutex);
 		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
@@ -226,6 +324,7 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 		close(value->wake_fd);
 		close(value->epoll_fd);
 		close(value->listener_fd);
+		pthread_mutex_destroy(&value->command_mutex);
 		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
@@ -297,6 +396,14 @@ int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connecti
 	return epoll_ctl(runtime->epoll_fd, EPOLL_CTL_MOD, nt_connection_get_fd(connection), &event);
 }
 
+int nt_runtime_request_rearm(nt_runtime_t *runtime, uint64_t handle, bool want_write) {
+	return nt_runtime_enqueue_command(runtime, handle, want_write, false);
+}
+
+int nt_runtime_request_close(nt_runtime_t *runtime, uint64_t handle) {
+	return nt_runtime_enqueue_command(runtime, handle, false, true);
+}
+
 int nt_runtime_run(nt_runtime_t *runtime) {
 	if (runtime == NULL) {
 		errno = EINVAL;
@@ -323,6 +430,7 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 				uint64_t value;
 				while (read(runtime->wake_fd, &value, sizeof(value)) == sizeof(value)) {
 				}
+				nt_runtime_process_commands(runtime);
 				continue;
 			}
 
@@ -359,6 +467,7 @@ int nt_runtime_run(nt_runtime_t *runtime) {
 	}
 
 	free(events);
+	nt_runtime_discard_commands(runtime);
 	nt_runtime_close_connections(runtime);
 	return 0;
 }
@@ -367,9 +476,7 @@ void nt_runtime_stop(nt_runtime_t *runtime) {
 	if (runtime != NULL) {
 		atomic_store_explicit(&runtime->stop_requested, true, memory_order_release);
 		if (runtime->wake_fd != -1) {
-			uint64_t value = 1;
-			ssize_t result = write(runtime->wake_fd, &value, sizeof(value));
-			(void)result;
+			(void)nt_runtime_wake(runtime);
 		}
 	}
 }
@@ -379,6 +486,7 @@ void nt_runtime_destroy(nt_runtime_t *runtime) {
 		return;
 	}
 
+	nt_runtime_discard_commands(runtime);
 	nt_runtime_destroy_connections(runtime);
 	if (runtime->wake_fd != -1) {
 		close(runtime->wake_fd);
@@ -389,6 +497,7 @@ void nt_runtime_destroy(nt_runtime_t *runtime) {
 	if (runtime->listener_fd != -1) {
 		close(runtime->listener_fd);
 	}
+	pthread_mutex_destroy(&runtime->command_mutex);
 	pthread_mutex_destroy(&runtime->connection_mutex);
 	free(runtime);
 }
