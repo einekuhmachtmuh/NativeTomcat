@@ -145,7 +145,23 @@ exactly one rearm / close
 
 例如：surface test PASS ≠ Tomcat integration PASS；compile PASS ≠ runtime semantics correct；native event test PASS ≠ Servlet readiness correct；benchmark harness 可執行 ≠ benchmark result 已取得。
 
-## 8. 工作記錄
+## 8. 本機 repo 與線上 repo 的逐步 diff 核驗
+
+當工作環境同時存在本機 repo 與 GitHub 線上 repo 時，每一個重要步驟完成後都必須重新比較兩者，不能只比較最後結果。
+
+核驗順序固定為：
+
+1. **先確認本機是否真的是 Git working tree**：檢查 `.git`、`git status`、目前 branch/commit；若不是 Git repo，不得聲稱取得了本機 Git diff。
+2. **固定比較基準**：記錄本機 `HEAD` 與線上目標 branch/ref 的 commit SHA；若兩者不是同一祖先或本機沒有對應 commit，先說明比較限制。
+3. **比較完整差異**：優先使用 Git 的 commit/ref comparison（例如 `git diff`、`git log`、必要時三點 diff）確認檔案增刪與內容差異；不能只比較少數已知修改檔案。
+4. **區分差異來源**：明確分類為「本機未同步的修改」、「線上已存在而本機缺少」、「本機未追蹤/未提交檔案」、「工具/換行或格式造成的差異」及「無法比較」。
+5. **逐步完成後立即複核**：本步驟修改 code/docs/test 後，先確認線上 commit 成功，再重新取得線上 ref 並重跑 diff；下一步不得建立在未核對的舊 snapshot 上。
+6. **不能把非 Git snapshot 當成 clean/dirty 狀態**：若本機只有匯出的檔案或壓縮內容而沒有 `.git`，只能做檔案內容比對；若檔案也不完整，必須標示 diff `blocked/incomplete`。
+7. **差異未解釋前不得宣稱同步**：只有在比較範圍與方法足以涵蓋相關工作樹，且所有差異都有明確來源後，才能稱為「本機與線上 repo 已對齊」；否則使用 `not synchronized / diff incomplete / verification blocked`。
+
+本規則的目的，是讓每一個工程步驟都具有可追溯的 before/after 狀態，避免本機 snapshot、線上 branch 與實際修改歷史彼此漂移。
+
+## 9. 工作記錄
 
 每完成重要步驟，記錄：
 
@@ -154,6 +170,7 @@ exactly one rearm / close
 - 採用的 contract；
 - code、docs、steps 的修正；
 - compile/test/verification 結果及其 verification level；
+- 本機 repo 與線上 repo 的 diff 核驗結果；
 - 尚未完成、blocked 或 deferred 的部分。
 
 本文件本身也受上述規則約束。若後續 source verification 證明其中規則有誤，依同一流程修訂，不把本文件視為不可更改的技術真理。
