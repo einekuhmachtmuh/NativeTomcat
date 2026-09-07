@@ -73,8 +73,20 @@ int main(void)
 			nt_jvm_destroy(jvm);
 			return EXIT_FAILURE;
 		}
+
 		status = nt_runtime_run(runtime);
+		int jvm_status = nt_jvm_stop(jvm);
 		nt_runtime_destroy(runtime);
+		nt_jvm_destroy(jvm);
+		if (status != 0) {
+			fprintf(stderr, "NativeTomcat: native runtime stopped with failure\n");
+			return EXIT_FAILURE;
+		}
+		if (jvm_status != 0) {
+			fprintf(stderr, "NativeTomcat: embedded JVM shutdown failed\n");
+			return EXIT_FAILURE;
+		}
+		return EXIT_SUCCESS;
 	}
 
 	status = nt_jvm_stop(jvm);
