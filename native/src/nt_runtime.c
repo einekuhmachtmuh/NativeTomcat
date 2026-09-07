@@ -271,8 +271,11 @@ int nt_runtime_init(nt_runtime_t **runtime, const nt_runtime_config_t *config) {
 	value->connection_handler_data = config->connection_handler_data;
 	atomic_init(&value->stop_requested, false);
 
-	if (pthread_mutex_init(&value->connection_mutex, NULL) != 0 ||
-			pthread_mutex_init(&value->command_mutex, NULL) != 0) {
+	if (pthread_mutex_init(&value->connection_mutex, NULL) != 0) {
+		free(value);
+		return -1;
+	}
+	if (pthread_mutex_init(&value->command_mutex, NULL) != 0) {
 		pthread_mutex_destroy(&value->connection_mutex);
 		free(value);
 		return -1;
