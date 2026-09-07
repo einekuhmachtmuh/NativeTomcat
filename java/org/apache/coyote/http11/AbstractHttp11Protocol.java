@@ -1,0 +1,1128 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one or more
+ *  contributor license agreements.  See the NOTICE file distributed with
+ *  this work for additional information regarding copyright ownership.
+ *  The ASF licenses this file to You under the Apache License, Version 2.0
+ *  (the "License"); you may not use this file except in compliance with
+ *  the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+package org.apache.coyote.http11;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
+
+import javax.management.ObjectInstance;
+import javax.management.ObjectName;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpUpgradeHandler;
+
+import org.apache.coyote.AbstractProtocol;
+import org.apache.coyote.CompressionConfig;
+import org.apache.coyote.ContinueResponseTiming;
+import org.apache.coyote.Processor;
+import org.apache.coyote.Request;
+import org.apache.coyote.Response;
+import org.apache.coyote.UpgradeProtocol;
+import org.apache.coyote.UpgradeToken;
+import org.apache.coyote.http11.upgrade.InternalHttpUpgradeHandler;
+import org.apache.coyote.http11.upgrade.UpgradeGroupInfo;
+import org.apache.coyote.http11.upgrade.UpgradeProcessorExternal;
+import org.apache.coyote.http11.upgrade.UpgradeProcessorInternal;
+import org.apache.tomcat.util.buf.StringUtils;
+import org.apache.tomcat.util.http.parser.HttpParser;
+import org.apache.tomcat.util.modeler.Registry;
+import org.apache.tomcat.util.modeler.Util;
+import org.apache.tomcat.util.net.AbstractEndpoint;
+import org.apache.tomcat.util.net.SSLHostConfig;
+import org.apache.tomcat.util.net.SocketWrapperBase;
+import org.apache.tomcat.util.net.openssl.OpenSSLImplementation;
+import org.apache.tomcat.util.res.StringManager;
+
+/**
+ * Base implementation of the HTTP/1.1 and HTTP/1.0 protocols.
+ *
+ * @param <S> The socket type
+ */
+public abstract class AbstractHttp11Protocol<S> extends AbstractProtocol<S> {
+
+    /**
+     * The StringManager for this package.
+     */
+    protected static final StringManager sm = StringManager.getManager(AbstractHttp11Protocol.class);
+
+    private final CompressionConfig compressionConfig = new CompressionConfig();
+
+    private HttpParser httpParser = null;
+
+    /**
+     * Construct a specific instance of this protocol handler.
+     *
+     * @param endpoint Endpoint on which to accept connections
+     */
+    public AbstractHttp11Protocol(AbstractEndpoint<S,?> endpoint) {
+        super(endpoint);
+        setConnectionTimeout(Constants.DEFAULT_CONNECTION_TIMEOUT);
+    }
+
+
+    @Override
+    public void init() throws Exception {
+        httpParser = new HttpParser(relaxedPathChars, relaxedQueryChars);
+
+        // Upgrade protocols have to be configured first since the endpoint
+        // init (triggered via super.init() below) uses this list to configure
+        // the list of ALPN protocols to advertise
+        for (UpgradeProtocol upgradeProtocol : upgradeProtocols) {
+            configureUpgradeProtocol(upgradeProtocol);
+        }
+
+        try {
+            super.init();
+        } finally {
+            // Set the Http11Protocol (i.e. this) for any upgrade protocols once
+            // this has completed initialisation as the upgrade protocols may expect this
+            // to be initialised when the call is made
+            for (UpgradeProtocol upgradeProtocol : upgradeProtocols) {
+                upgradeProtocol.setHttp11Protocol(this);
+            }
+        }
+    }
+
+
+    @Override
+    public void destroy() throws Exception {
+        // There may be upgrade protocols with their own MBeans. These need to
+        // be de-registered.
+        ObjectName rgOname = getGlobalRequestProcessorMBeanName();
+        if (rgOname != null) {
+            Registry registry = Registry.getRegistry(null);
+            ObjectName query = new ObjectName(rgOname.getCanonicalName() + ",Upgrade=*");
+            Set<ObjectInstance> upgrades = registry.getMBeanServer().queryMBeans(query, null);
+            for (ObjectInstance upgrade : upgrades) {
+                registry.unregisterComponent(upgrade.getObjectName());
+            }
+        }
+
+        super.destroy();
+    }
+
+
+    @Override
+    protected String getProtocolName() {
+        return "Http";
+    }
+
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Over-ridden here to make the method visible to nested classes.
+     */
+    @Override
+    protected AbstractEndpoint<S,?> getEndpoint() {
+        return super.getEndpoint();
+    }
+
+
+    /**
+     * Get the HttpParser used to parse relaxed characters.
+     *
+     * @return the HttpParser
+     */
+    public HttpParser getHttpParser() {
+        return httpParser;
+    }
+
+
+    // ------------------------------------------------ HTTP specific properties
+    // ------------------------------------------ managed in the ProtocolHandler
+
+    private ContinueResponseTiming continueResponseTiming = ContinueResponseTiming.IMMEDIATELY;
+
+    /**
+     * Get the setting for how responses to 100-Continue requests will be sent.
+     *
+     * @return The current continue response timing setting
+     */
+    public String getContinueResponseTiming() {
+        return continueResponseTiming.toString();
+    }
+
+    /**
+     * Set the setting for how responses to 100-Continue requests will be sent.
+     *
+     * @param continueResponseTiming The new continue response timing setting
+     */
+    public void setContinueResponseTiming(String continueResponseTiming) {
+        this.continueResponseTiming = ContinueResponseTiming.fromString(continueResponseTiming);
+    }
+
+    /**
+     * Get the continue response timing setting as an enum value.
+     *
+     * @return The continue response timing
+     */
+    public ContinueResponseTiming getContinueResponseTimingInternal() {
+        return continueResponseTiming;
+    }
+
+
+    private boolean useKeepAliveResponseHeader = true;
+
+    /**
+     * Get the flag that controls whether the Keep-Alive response header will be used.
+     *
+     * @return {@code true} if the Keep-Alive response header will be used
+     */
+    public boolean getUseKeepAliveResponseHeader() {
+        return useKeepAliveResponseHeader;
+    }
+
+    /**
+     * Set the flag that controls whether the Keep-Alive response header will be used.
+     *
+     * @param useKeepAliveResponseHeader {@code true} if the Keep-Alive response header should be used
+     */
+    public void setUseKeepAliveResponseHeader(boolean useKeepAliveResponseHeader) {
+        this.useKeepAliveResponseHeader = useKeepAliveResponseHeader;
+    }
+
+
+    private String relaxedPathChars = null;
+
+    /**
+     * Get the set of characters allowed in a URL path.
+     *
+     * @return The allowed path characters
+     */
+    public String getRelaxedPathChars() {
+        return relaxedPathChars;
+    }
+
+    /**
+     * Set the set of characters allowed in a URL path.
+     *
+     * @param relaxedPathChars The allowed path characters
+     */
+    public void setRelaxedPathChars(String relaxedPathChars) {
+        this.relaxedPathChars = relaxedPathChars;
+    }
+
+
+    private String relaxedQueryChars = null;
+
+    /**
+     * Get the set of characters allowed in a URL query string.
+     *
+     * @return The allowed query characters
+     */
+    public String getRelaxedQueryChars() {
+        return relaxedQueryChars;
+    }
+
+    /**
+     * Set the set of characters allowed in a URL query string.
+     *
+     * @param relaxedQueryChars The allowed query characters
+     */
+    public void setRelaxedQueryChars(String relaxedQueryChars) {
+        this.relaxedQueryChars = relaxedQueryChars;
+    }
+
+
+    private int maxSavePostSize = 4 * 1024;
+
+    /**
+     * Return the maximum size of the post which will be saved during FORM or CLIENT-CERT authentication.
+     *
+     * @return The size in bytes
+     */
+    public int getMaxSavePostSize() {
+        return maxSavePostSize;
+    }
+
+    /**
+     * Set the maximum size of a POST which will be buffered during FORM or CLIENT-CERT authentication. When a POST is
+     * received where the security constraints require a client certificate, the POST body needs to be buffered while an
+     * SSL handshake takes place to obtain the certificate. A similar buffering is required during FORM auth.
+     *
+     * @param maxSavePostSize The maximum size POST body to buffer in bytes
+     */
+    public void setMaxSavePostSize(int maxSavePostSize) {
+        this.maxSavePostSize = maxSavePostSize;
+    }
+
+
+    /**
+     * Maximum size of the HTTP message header.
+     */
+    private int maxHttpHeaderSize = 8 * 1024;
+
+    /**
+     * Get the maximum size of the HTTP message header.
+     *
+     * @return The maximum size of the HTTP message header in bytes
+     */
+    public int getMaxHttpHeaderSize() {
+        return maxHttpHeaderSize;
+    }
+
+    /**
+     * Set the maximum size of the HTTP message header.
+     *
+     * @param valueI The maximum size of the HTTP message header in bytes
+     */
+    public void setMaxHttpHeaderSize(int valueI) {
+        maxHttpHeaderSize = valueI;
+    }
+
+
+    /**
+     * Maximum size of the HTTP request message header.
+     */
+    private int maxHttpRequestHeaderSize = -1;
+
+    /**
+     * Get the maximum size of the HTTP request message header.
+     *
+     * @return The maximum size of the HTTP request message header in bytes
+     */
+    public int getMaxHttpRequestHeaderSize() {
+        return maxHttpRequestHeaderSize == -1 ? getMaxHttpHeaderSize() : maxHttpRequestHeaderSize;
+    }
+
+    /**
+     * Set the maximum size of the HTTP request message header.
+     *
+     * @param valueI The maximum size of the HTTP request message header in bytes
+     */
+    public void setMaxHttpRequestHeaderSize(int valueI) {
+        maxHttpRequestHeaderSize = valueI;
+    }
+
+
+    /**
+     * Maximum size of the HTTP response message header.
+     */
+    private int maxHttpResponseHeaderSize = -1;
+
+    /**
+     * Get the maximum size of the HTTP response message header.
+     *
+     * @return The maximum size of the HTTP response message header in bytes
+     */
+    public int getMaxHttpResponseHeaderSize() {
+        return maxHttpResponseHeaderSize == -1 ? getMaxHttpHeaderSize() : maxHttpResponseHeaderSize;
+    }
+
+    /**
+     * Set the maximum size of the HTTP response message header.
+     *
+     * @param valueI The maximum size of the HTTP response message header in bytes
+     */
+    public void setMaxHttpResponseHeaderSize(int valueI) {
+        maxHttpResponseHeaderSize = valueI;
+    }
+
+
+    private int connectionUploadTimeout = 300000;
+
+    /**
+     * Specifies a different (usually longer) connection timeout during data upload. Default is 5 minutes as in Apache
+     * HTTPD server.
+     *
+     * @return The timeout in milliseconds
+     */
+    public int getConnectionUploadTimeout() {
+        return connectionUploadTimeout;
+    }
+
+    /**
+     * Set the upload timeout.
+     *
+     * @param timeout Upload timeout in milliseconds
+     */
+    public void setConnectionUploadTimeout(int timeout) {
+        connectionUploadTimeout = timeout;
+    }
+
+
+    private boolean disableUploadTimeout = true;
+
+    /**
+     * Get the flag that controls upload time-outs. If true, the connectionUploadTimeout will be ignored and the regular
+     * socket timeout will be used for the full duration of the connection.
+     *
+     * @return {@code true} if the separate upload timeout is disabled
+     */
+    public boolean getDisableUploadTimeout() {
+        return disableUploadTimeout;
+    }
+
+    /**
+     * Set the flag to control whether a separate connection timeout is used during upload of a request body.
+     *
+     * @param isDisabled {@code true} if the separate upload timeout should be disabled
+     */
+    public void setDisableUploadTimeout(boolean isDisabled) {
+        disableUploadTimeout = isDisabled;
+    }
+
+
+    /**
+     * Set the compression setting.
+     *
+     * @param compression The compression setting
+     */
+    public void setCompression(String compression) {
+        compressionConfig.setCompression(compression);
+    }
+
+    /**
+     * Get the compression setting.
+     *
+     * @return The compression setting
+     */
+    public String getCompression() {
+        return compressionConfig.getCompression();
+    }
+
+    /**
+     * Get the compression level.
+     *
+     * @return The compression level
+     */
+    protected int getCompressionLevel() {
+        return compressionConfig.getCompressionLevel();
+    }
+
+
+    /**
+     * Get the list of user agents that should not use compression.
+     *
+     * @return The user agents that should not use compression
+     */
+    public String getNoCompressionUserAgents() {
+        return compressionConfig.getNoCompressionUserAgents();
+    }
+
+    /**
+     * Get the pattern of user agents that should not use compression.
+     *
+     * @return The pattern of user agents that should not use compression
+     */
+    protected Pattern getNoCompressionUserAgentsPattern() {
+        return compressionConfig.getNoCompressionUserAgentsPattern();
+    }
+
+    /**
+     * Set the list of user agents that should not use compression.
+     *
+     * @param noCompressionUserAgents The user agents that should not use compression
+     */
+    public void setNoCompressionUserAgents(String noCompressionUserAgents) {
+        compressionConfig.setNoCompressionUserAgents(noCompressionUserAgents);
+    }
+
+
+    /**
+     * Get the MIME types that may be subject to compression.
+     *
+     * @return The MIME types that may be subject to compression
+     */
+    public String getCompressibleMimeType() {
+        return compressionConfig.getCompressibleMimeType();
+    }
+
+    /**
+     * Set the MIME types that may be subject to compression.
+     *
+     * @param valueS The MIME types that may be subject to compression
+     */
+    public void setCompressibleMimeType(String valueS) {
+        compressionConfig.setCompressibleMimeType(valueS);
+    }
+
+    /**
+     * Get the MIME types that may be subject to compression as an array.
+     *
+     * @return The MIME types that may be subject to compression
+     */
+    public String[] getCompressibleMimeTypes() {
+        return compressionConfig.getCompressibleMimeTypes();
+    }
+
+
+    /**
+     * Get the minimum response size for compression to be applied.
+     *
+     * @return The minimum response size in bytes
+     */
+    public int getCompressionMinSize() {
+        return compressionConfig.getCompressionMinSize();
+    }
+
+    /**
+     * Set the minimum response size for compression to be applied.
+     *
+     * @param compressionMinSize The minimum response size in bytes
+     */
+    public void setCompressionMinSize(int compressionMinSize) {
+        compressionConfig.setCompressionMinSize(compressionMinSize);
+    }
+
+
+    /**
+     * Get the content encodings that should not be used.
+     *
+     * @return The content encodings that should not be used
+     */
+    public String getNoCompressionEncodings() {
+        return compressionConfig.getNoCompressionEncodings();
+    }
+
+    /**
+     * Set the content encodings that should not be used.
+     *
+     * @param encodings The content encodings that should not be used
+     */
+    public void setNoCompressionEncodings(String encodings) {
+        compressionConfig.setNoCompressionEncodings(encodings);
+    }
+
+
+    /**
+     * Check if compression should be used for the specified request/response.
+     *
+     * @param request The HTTP request
+     * @param response The HTTP response
+     * @return {@code true} if compression should be used
+     */
+    public boolean useCompression(Request request, Response response) {
+        return compressionConfig.useCompression(request, response);
+    }
+
+
+    private Pattern restrictedUserAgents = null;
+
+    /**
+     * Get the string form of the regular expression that defines the User agents which should be restricted to HTTP/1.0
+     * support.
+     *
+     * @return The regular expression as a String
+     */
+    public String getRestrictedUserAgents() {
+        if (restrictedUserAgents == null) {
+            return null;
+        } else {
+            return restrictedUserAgents.toString();
+        }
+    }
+
+    /**
+     * Get the pattern of user agents that should be restricted to HTTP/1.0.
+     *
+     * @return The pattern of user agents that should be restricted to HTTP/1.0
+     */
+    protected Pattern getRestrictedUserAgentsPattern() {
+        return restrictedUserAgents;
+    }
+
+    /**
+     * Set restricted user agent list (which will downgrade the connector to HTTP/1.0 mode). Regular expression as
+     * supported by {@link Pattern}.
+     *
+     * @param restrictedUserAgents The regular expression as supported by {@link Pattern} for the user agents
+     */
+    public void setRestrictedUserAgents(String restrictedUserAgents) {
+        if (restrictedUserAgents == null || restrictedUserAgents.isEmpty()) {
+            this.restrictedUserAgents = null;
+        } else {
+            this.restrictedUserAgents = Pattern.compile(restrictedUserAgents);
+        }
+    }
+
+
+    private String server;
+
+    /**
+     * Get the value of the Server response header.
+     *
+     * @return The value of the Server response header
+     */
+    public String getServer() {
+        return server;
+    }
+
+    /**
+     * Set the server header name.
+     *
+     * @param server The new value to use for the server header
+     */
+    public void setServer(String server) {
+        this.server = server;
+    }
+
+
+    private boolean serverRemoveAppProvidedValues = false;
+
+    /**
+     * Should application provider values for the HTTP Server header be removed. Note that if {@link #server} is set,
+     * any application provided value will be over-ridden.
+     *
+     * @return {@code true} if application provided values should be removed, otherwise {@code false}
+     */
+    public boolean getServerRemoveAppProvidedValues() {
+        return serverRemoveAppProvidedValues;
+    }
+
+    /**
+     * Set whether application provider values for the HTTP Server header should be removed.
+     *
+     * @param serverRemoveAppProvidedValues {@code true} if application provided values should be removed
+     */
+    public void setServerRemoveAppProvidedValues(boolean serverRemoveAppProvidedValues) {
+        this.serverRemoveAppProvidedValues = serverRemoveAppProvidedValues;
+    }
+
+
+    /**
+     * Maximum size of trailing headers in bytes
+     */
+    private int maxTrailerSize = 8192;
+
+    /**
+     * Get the maximum size of trailing headers.
+     *
+     * @return The maximum size of trailing headers in bytes
+     */
+    public int getMaxTrailerSize() {
+        return maxTrailerSize;
+    }
+
+    /**
+     * Set the maximum size of trailing headers.
+     *
+     * @param maxTrailerSize The maximum size of trailing headers in bytes
+     */
+    public void setMaxTrailerSize(int maxTrailerSize) {
+        this.maxTrailerSize = maxTrailerSize;
+    }
+
+
+    /**
+     * Maximum size of extension information in chunked encoding
+     */
+    private int maxExtensionSize = 8192;
+
+    /**
+     * Get the maximum size of extension information in chunked encoding.
+     *
+     * @return The maximum size of extension information in bytes
+     */
+    public int getMaxExtensionSize() {
+        return maxExtensionSize;
+    }
+
+    /**
+     * Set the maximum size of extension information in chunked encoding.
+     *
+     * @param maxExtensionSize The maximum size of extension information in bytes
+     */
+    public void setMaxExtensionSize(int maxExtensionSize) {
+        this.maxExtensionSize = maxExtensionSize;
+    }
+
+
+    /**
+     * Maximum amount of request body to swallow.
+     */
+    private int maxSwallowSize = 2 * 1024 * 1024;
+
+    /**
+     * Get the maximum amount of request body to swallow.
+     *
+     * @return The maximum amount of request body to swallow in bytes
+     */
+    public int getMaxSwallowSize() {
+        return maxSwallowSize;
+    }
+
+    /**
+     * Set the maximum amount of request body to swallow.
+     *
+     * @param maxSwallowSize The maximum amount of request body to swallow in bytes
+     */
+    public void setMaxSwallowSize(int maxSwallowSize) {
+        this.maxSwallowSize = maxSwallowSize;
+    }
+
+
+    /**
+     * This field indicates if the protocol is treated as if it is secure. This normally means https is being used but
+     * can be used to fake https e.g behind a reverse proxy.
+     */
+    private boolean secure;
+
+    /**
+     * Get the flag indicating if this protocol is treated as secure.
+     *
+     * @return {@code true} if this protocol is treated as secure
+     */
+    public boolean getSecure() {
+        return secure;
+    }
+
+    /**
+     * Set the flag indicating if this protocol is treated as secure.
+     *
+     * @param b {@code true} if this protocol is treated as secure
+     */
+    public void setSecure(boolean b) {
+        secure = b;
+    }
+
+
+    /**
+     * The names of headers that are allowed to be sent via a trailer when using chunked encoding. They are stored in
+     * lower case.
+     */
+    private final Set<String> allowedTrailerHeaders = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Set the names of headers that are allowed to be sent via a trailer when using chunked encoding.
+     *
+     * @param commaSeparatedHeaders Comma separated list of header names
+     */
+    public void setAllowedTrailerHeaders(String commaSeparatedHeaders) {
+        // Jump through some hoops so we don't end up with an empty set while
+        // doing updates.
+        Set<String> toRemove = new HashSet<>(allowedTrailerHeaders);
+        if (commaSeparatedHeaders != null) {
+            String[] headers = commaSeparatedHeaders.split(",");
+            for (String header : headers) {
+                String trimmedHeader = header.trim().toLowerCase(Locale.ENGLISH);
+                if (toRemove.contains(trimmedHeader)) {
+                    toRemove.remove(trimmedHeader);
+                } else {
+                    allowedTrailerHeaders.add(trimmedHeader);
+                }
+            }
+            allowedTrailerHeaders.removeAll(toRemove);
+        } else {
+            allowedTrailerHeaders.clear();
+        }
+    }
+
+    /**
+     * Get the set of allowed trailer header names.
+     *
+     * @return The set of allowed trailer header names
+     */
+    protected Set<String> getAllowedTrailerHeadersInternal() {
+        return allowedTrailerHeaders;
+    }
+
+    /**
+     * Check if a header name is in the set of allowed trailer headers.
+     *
+     * @param headerName The header name to check
+     * @return {@code true} if the header is allowed as a trailer header
+     */
+    public boolean isTrailerHeaderAllowed(String headerName) {
+        return allowedTrailerHeaders.contains(headerName.trim().toLowerCase(Locale.ENGLISH));
+    }
+
+    /**
+     * Get the list of allowed trailer headers as a comma-separated string.
+     *
+     * @return The allowed trailer headers as a comma-separated string
+     */
+    public String getAllowedTrailerHeaders() {
+        // Chances of a change during execution of this line are small enough
+        // that a sync is unnecessary.
+        List<String> copy = new ArrayList<>(allowedTrailerHeaders);
+        return StringUtils.join(copy);
+    }
+
+    /**
+     * Add a header name to the set of allowed trailer headers.
+     *
+     * @param header The header name to add
+     */
+    public void addAllowedTrailerHeader(String header) {
+        if (header != null) {
+            allowedTrailerHeaders.add(header.trim().toLowerCase(Locale.ENGLISH));
+        }
+    }
+
+    /**
+     * Remove a header name from the set of allowed trailer headers.
+     *
+     * @param header The header name to remove
+     */
+    public void removeAllowedTrailerHeader(String header) {
+        if (header != null) {
+            allowedTrailerHeaders.remove(header.trim().toLowerCase(Locale.ENGLISH));
+        }
+    }
+
+
+    /**
+     * The upgrade protocol instances configured.
+     */
+    private final List<UpgradeProtocol> upgradeProtocols = new ArrayList<>();
+
+    @Override
+    public void addUpgradeProtocol(UpgradeProtocol upgradeProtocol) {
+        upgradeProtocols.add(upgradeProtocol);
+    }
+
+    @Override
+    public UpgradeProtocol[] findUpgradeProtocols() {
+        return upgradeProtocols.toArray(new UpgradeProtocol[0]);
+    }
+
+
+    /**
+     * The protocols that are available via internal Tomcat support for access via HTTP upgrade.
+     */
+    private final Map<String,UpgradeProtocol> httpUpgradeProtocols = new HashMap<>();
+    /**
+     * The protocols that are available via internal Tomcat support for access via ALPN negotiation.
+     */
+    private final Map<String,UpgradeProtocol> negotiatedProtocols = new HashMap<>();
+
+    private void configureUpgradeProtocol(UpgradeProtocol upgradeProtocol) {
+        // HTTP Upgrade
+        String httpUpgradeName = upgradeProtocol.getHttpUpgradeName(getEndpoint().isSSLEnabled());
+        boolean httpUpgradeConfigured = false;
+        if (httpUpgradeName != null && !httpUpgradeName.isEmpty()) {
+            httpUpgradeProtocols.put(httpUpgradeName, upgradeProtocol);
+            httpUpgradeConfigured = true;
+            getLog().info(sm.getString("abstractHttp11Protocol.httpUpgradeConfigured", getName(), httpUpgradeName));
+        }
+
+
+        // ALPN
+        String alpnName = upgradeProtocol.getAlpnName();
+        if (alpnName != null && !alpnName.isEmpty()) {
+            // ALPN is only available with TLS
+            if (getEndpoint().isSSLEnabled()) {
+                negotiatedProtocols.put(alpnName, upgradeProtocol);
+                getEndpoint().addNegotiatedProtocol(alpnName);
+                getLog().info(sm.getString("abstractHttp11Protocol.alpnConfigured", getName(), alpnName));
+            } else {
+                if (!httpUpgradeConfigured) {
+                    // ALPN is not supported by this connector and the upgrade
+                    // protocol implementation does not support standard HTTP
+                    // upgrade so there is no way available to enable support
+                    // for this protocol.
+                    getLog().error(sm.getString("abstractHttp11Protocol.alpnWithNoAlpn",
+                            upgradeProtocol.getClass().getName(), alpnName, getName()));
+                }
+            }
+        }
+    }
+
+    @Override
+    public UpgradeProtocol getNegotiatedProtocol(String negotiatedName) {
+        return negotiatedProtocols.get(negotiatedName);
+    }
+
+    @Override
+    public UpgradeProtocol getUpgradeProtocol(String upgradedName) {
+        return httpUpgradeProtocols.get(upgradedName);
+    }
+
+
+    /**
+     * Map of upgrade protocol name to {@link UpgradeGroupInfo} instance.
+     * <p>
+     * HTTP upgrades via {@link HttpServletRequest#upgrade(Class)} do not have to depend on an {@code UpgradeProtocol}.
+     * To enable basic statistics to be made available for these protocols, a map of protocol name to
+     * {@link UpgradeGroupInfo} instances is maintained here.
+     */
+    private final Map<String,UpgradeGroupInfo> upgradeProtocolGroupInfos = new ConcurrentHashMap<>();
+
+    /**
+     * Get the upgrade group info for the specified upgrade protocol.
+     *
+     * @param upgradeProtocol The upgrade protocol name
+     * @return The upgrade group info for the specified protocol
+     */
+    public UpgradeGroupInfo getUpgradeGroupInfo(String upgradeProtocol) {
+        if (upgradeProtocol == null) {
+            return null;
+        }
+        UpgradeGroupInfo result = upgradeProtocolGroupInfos.get(upgradeProtocol);
+        if (result == null) {
+            // Protecting against multiple JMX registration, not modification
+            // of the Map.
+            synchronized (upgradeProtocolGroupInfos) {
+                result = upgradeProtocolGroupInfos.get(upgradeProtocol);
+                if (result == null) {
+                    result = new UpgradeGroupInfo();
+                    upgradeProtocolGroupInfos.put(upgradeProtocol, result);
+                    ObjectName oname = getONameForUpgrade(upgradeProtocol);
+                    if (oname != null) {
+                        try {
+                            Registry.getRegistry(null).registerComponent(result, oname, null);
+                        } catch (Exception e) {
+                            getLog().warn(sm.getString("abstractHttp11Protocol.upgradeJmxRegistrationFail"), e);
+                            result = null;
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+
+    /**
+     * Get the ObjectName for the MBean of the specified upgrade protocol.
+     *
+     * @param upgradeProtocol The upgrade protocol name
+     * @return The ObjectName for the upgrade protocol MBean, or {@code null}
+     */
+    public ObjectName getONameForUpgrade(String upgradeProtocol) {
+        ObjectName oname = null;
+        ObjectName parentRgOname = getGlobalRequestProcessorMBeanName();
+        if (parentRgOname != null) {
+            StringBuilder name = new StringBuilder(parentRgOname.getCanonicalName());
+            name.append(",Upgrade=");
+            if (Util.objectNameValueNeedsQuote(upgradeProtocol)) {
+                name.append(ObjectName.quote(upgradeProtocol));
+            } else {
+                name.append(upgradeProtocol);
+            }
+            try {
+                oname = new ObjectName(name.toString());
+            } catch (Exception e) {
+                getLog().warn(sm.getString("abstractHttp11Protocol.upgradeJmxNameFail"), e);
+            }
+        }
+        return oname;
+    }
+
+
+    // ------------------------------------------------ HTTP specific properties
+    // ------------------------------------------ passed through to the EndPoint
+
+    /**
+     * Check if SSL is enabled on this connector.
+     *
+     * @return {@code true} if SSL is enabled
+     */
+    public boolean isSSLEnabled() {
+        return getEndpoint().isSSLEnabled();
+    }
+
+    /**
+     * Set whether SSL is enabled on this connector.
+     *
+     * @param SSLEnabled {@code true} if SSL is enabled
+     */
+    public void setSSLEnabled(boolean SSLEnabled) {
+        getEndpoint().setSSLEnabled(SSLEnabled);
+    }
+
+
+    /**
+     * Check if sendfile is enabled for this connector.
+     *
+     * @return {@code true} if sendfile is enabled
+     */
+    public boolean getUseSendfile() {
+        return getEndpoint().getUseSendfile();
+    }
+
+    /**
+     * Set whether sendfile is enabled for this connector.
+     *
+     * @param useSendfile {@code true} if sendfile is enabled
+     */
+    public void setUseSendfile(boolean useSendfile) {
+        getEndpoint().setUseSendfile(useSendfile);
+    }
+
+
+    /**
+     * Get the maximum number of requests which can be performed over a keep-alive connection.
+     * The default is the same as for Apache HTTP Server (100).
+     *
+     * @return The maximum number of requests which can be performed over a keep-alive connection
+     */
+    public int getMaxKeepAliveRequests() {
+        return getEndpoint().getMaxKeepAliveRequests();
+    }
+
+    /**
+     * Set the maximum number of Keep-Alive requests to allow. This is to safeguard from DoS attacks. Setting to a
+     * negative value disables the limit.
+     *
+     * @param mkar The new maximum number of Keep-Alive requests allowed
+     */
+    public void setMaxKeepAliveRequests(int mkar) {
+        getEndpoint().setMaxKeepAliveRequests(mkar);
+    }
+
+
+    // ----------------------------------------------- HTTPS specific properties
+    // ------------------------------------------ passed through to the EndPoint
+
+    /**
+     * Get the default SSL host configuration name.
+     *
+     * @return The default SSL host configuration name
+     */
+    public String getDefaultSSLHostConfigName() {
+        return getEndpoint().getDefaultSSLHostConfigName();
+    }
+
+    /**
+     * Set the default SSL host configuration name.
+     *
+     * @param defaultSSLHostConfigName The default SSL host configuration name
+     */
+    public void setDefaultSSLHostConfigName(String defaultSSLHostConfigName) {
+        getEndpoint().setDefaultSSLHostConfigName(defaultSSLHostConfigName);
+    }
+
+
+    @Override
+    public void addSslHostConfig(SSLHostConfig sslHostConfig) {
+        getEndpoint().addSslHostConfig(sslHostConfig);
+    }
+
+
+    @Override
+    public void addSslHostConfig(SSLHostConfig sslHostConfig, boolean replace) {
+        getEndpoint().addSslHostConfig(sslHostConfig, replace);
+    }
+
+
+    @Override
+    public SSLHostConfig[] findSslHostConfigs() {
+        return getEndpoint().findSslHostConfigs();
+    }
+
+
+    /**
+     * Reload all SSL host configurations.
+     */
+    public void reloadSslHostConfigs() {
+        getEndpoint().reloadSslHostConfigs();
+    }
+
+
+    /**
+     * Reload the SSL host configuration for the specified host.
+     *
+     * @param hostName The host name to reload
+     */
+    public void reloadSslHostConfig(String hostName) {
+        getEndpoint().reloadSslHostConfig(hostName);
+    }
+
+
+    /**
+     * Get the short name of the SSL implementation.
+     *
+     * @return The short name of the SSL implementation
+     */
+    protected String getSslImplementationShortName() {
+        if (OpenSSLImplementation.class.getName().equals(getSslImplementationName())) {
+            return "openssl";
+        }
+        if (getSslImplementationName() != null &&
+                getSslImplementationName().endsWith(".panama.OpenSSLImplementation")) {
+            return "opensslffm";
+        }
+        return "jsse";
+    }
+
+    /**
+     * Get the name of the SSL implementation.
+     *
+     * @return The name of the SSL implementation
+     */
+    public String getSslImplementationName() {
+        return getEndpoint().getSslImplementationName();
+    }
+
+    /**
+     * Set the name of the SSL implementation.
+     *
+     * @param s The name of the SSL implementation
+     */
+    public void setSslImplementationName(String s) {
+        getEndpoint().setSslImplementationName(s);
+    }
+
+
+    /**
+     * Get the SNI parse limit.
+     *
+     * @return The SNI parse limit
+     */
+    public int getSniParseLimit() {
+        return getEndpoint().getSniParseLimit();
+    }
+
+    /**
+     * Set the SNI parse limit.
+     *
+     * @param sniParseLimit The SNI parse limit
+     */
+    public void setSniParseLimit(int sniParseLimit) {
+        getEndpoint().setSniParseLimit(sniParseLimit);
+    }
+
+
+    /**
+     * Check the SNI hostname.
+     *
+     * @param sniHostName The SNI hostname
+     * @param protocolHostName The protocol hostname
+     * @return {@code true} if the SNI check passes
+     */
+    public boolean checkSni(String sniHostName, String protocolHostName) {
+        return getEndpoint().checkSni(sniHostName, protocolHostName);
+    }
+
+    // ------------------------------------------------------------- Common code
+
+    @Override
+    protected Processor createProcessor() {
+        return new Http11Processor(this, adapter);
+    }
+
+
+    @Override
+    protected Processor createUpgradeProcessor(SocketWrapperBase<?> socket, UpgradeToken upgradeToken) {
+        HttpUpgradeHandler httpUpgradeHandler = upgradeToken.httpUpgradeHandler();
+        if (httpUpgradeHandler instanceof InternalHttpUpgradeHandler) {
+            return new UpgradeProcessorInternal(socket, upgradeToken, getUpgradeGroupInfo(upgradeToken.protocol()));
+        } else {
+            return new UpgradeProcessorExternal(socket, upgradeToken, getUpgradeGroupInfo(upgradeToken.protocol()));
+        }
+    }
+}
