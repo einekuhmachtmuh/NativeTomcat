@@ -54,7 +54,21 @@ Native runtime 的 command queue 會在 `nt_runtime_process_commands()` 內對�
 
 原因是 native event loop 在收到 readiness 後會呼叫 `nt_jvm_dispatch_event()`，而 Java 端 `NativeEventDispatcher` 只是把工作 hand-off 給 Tomcat executor；native event loop 並不等待 `SocketProcessor` 完成。若同一 processor cycle 的 Java worker 先後提交兩個 rearm command，native event loop 可能在兩個 command 之間已經醒來並取走第一批 command，之後第二個 command 會形成另一批 wake/command processing。故目前實作對「每個 native readiness cycle 恰好一次有效 rearm/close」仍只有設計意圖，沒有 source-level guarantee 或 runtime measurement。
 
-這不是要求把 Java processing 改成阻塞 native event loop；正確下一步是先定義並核驗一個明確的 event-cycle completion/interest ownership contract，使 native event-loop owner 能在 Java transport consumption 完成後決定單一最終 interest state，同時不能破壞 Tomcat blocking read/write waiter 的立即 rearm 語意。任何修改前都必須再次對照 pinned `NioEndpoint.Poller.processKey()`、`AbstractProtocol.ConnectionHandler` 與 `SocketWrapperBase.register*Interest()`。
+### 新增 source-level finding：`want_write` 目前不是 Tomcat NIO interest 的等價表示
+
+這次進一步逐行比對 pinned `NioEndpoint.Poller.processKey()`、`NioSocketWrapper` 與 `SocketWrapperBase.register*Interest()` 後，發現另一個必須在 HTTP integration 前修正的語意差異：Tomcat NIO 的 `registerReadInterest()` / `registerWriteInterest()` 是對既有 interest set 做累加；Poller 的 `add()`/`events()` 以 `key.interestOps() | interestOps` 保留另一方向的 interest。換言之，`registerReadInterest()` 並不代表「清除 OP_WRITE」。同一 processor cycle 若先要求 WRITE、後要求 READ，WRITE interest 仍應存在。
+
+Native runtime 目前的 `nt_runtime_rearm_connection(runtime, connection, want_write)` 則直接建立 `EPOLLIN | EPOLLRDHUP | EPOLLONESHOT`，只有 `want_write == true` 才加入 `EPOLLOUT`。因此目前 `registerReadInterest()` 所提交的 `false` command 可能把先前已要求的 WRITE interest 清掉；這與 pinned Tomcat NIO 的 OR semantics 不一致。這不是單純的效能問題，而是 transport readiness semantics 的 correctness issue。
+
+因此下一個實作應先修正 **interest representation/ownership**，再談 exactly-one syscall optimization：
+
+1. Java wrapper 必須保存「目前這個 readiness/interest epoch 是否已要求 WRITE」的狀態；`registerReadInterest()` 不得破壞既有 WRITE request。
+2. Native event cycle 開始時必須有明確的 epoch reset，使上一個 ONESHOT readiness cycle 的 WRITE request 不會永久污染下一個 cycle。
+3. Native command queue 的 coalescing 應以最終 desired interest 為準，而不是把 `false` 視為「刪除 WRITE」。
+4. 同一 desired state 的重複 command 應可在 native owner 端被辨識為 no-op，才有資格進一步宣稱「effective rearm」的去重；這與單純 batch coalescing 是不同層次。
+5. blocking read/write waiter 的 immediate rearm 必須保留；不得為了去重而讓 blocking I/O 等待 native event-loop 完成整個 Java processor cycle。
+
+在上述 correctness contract 完成前，**不應加入以「等待 Java processor 完成」為核心的 event-cycle barrier**；那會直接改變目前 native event-loop 與 Tomcat executor 的 thread/latency model，且沒有 pinned Tomcat 或 NGINX source 支持這種必要性。
 
 ## NGINX 1.30.4 交叉核對
 
