@@ -216,14 +216,21 @@ public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
 		@Override
 		protected void doRun()
 		{
-			SocketWrapperBase<Long> wrapper = socketWrapper;
-			if (wrapper == null || wrapper.isClosed()) {
-				return;
-			}
+			try {
+				SocketWrapperBase<Long> wrapper = socketWrapper;
+				if (wrapper == null || wrapper.isClosed()) {
+					return;
+				}
 
-			Handler.SocketState state = getHandler().process(wrapper, event);
-			if (state == Handler.SocketState.CLOSED) {
-				wrapper.close();
+				Handler.SocketState state = getHandler().process(wrapper, event);
+				if (state == Handler.SocketState.CLOSED) {
+					wrapper.close();
+				}
+			} finally {
+				event = null;
+				if (running && processorCache != null) {
+					processorCache.push(this);
+				}
 			}
 		}
 	}
