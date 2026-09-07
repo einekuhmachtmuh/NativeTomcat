@@ -176,7 +176,10 @@ int main(void) {
 	nt_connection_t *connection = nt_runtime_find_connection(runtime, handle);
 	assert(connection != NULL);
 	wait_for_closed(connection);
-	assert(nt_runtime_find_connection(runtime, handle) == connection);
+	assert(nt_runtime_find_connection(runtime, handle) == NULL);
+	errno = 0;
+	assert(nt_runtime_request_rearm(runtime, handle, false) == 0);
+	assert(nt_runtime_request_close(runtime, handle) == 0);
 
 	nt_runtime_stop(runtime);
 	assert(pthread_join(thread, NULL) == 0);
