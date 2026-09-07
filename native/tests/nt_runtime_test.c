@@ -16,6 +16,7 @@ struct test_context {
 	atomic_int peer_eof_events;
 	atomic_bool callback_error;
 	atomic_uint_fast64_t first_handle;
+	atomic_bool close_requested;
 };
 
 static void test_connection_handler(nt_runtime_t *runtime, nt_connection_t *connection,
@@ -125,12 +126,23 @@ static void send_and_expect_echo(int fd, const char *message) {
 	assert(memcmp(buffer, message, length) == 0);
 }
 
+static void wait_for_closed(nt_connection_t *connection) {
+	for (int attempt = 0; attempt < 100; ++attempt) {
+		if (nt_connection_get_state(connection) == NT_CONNECTION_CLOSED) {
+			return;
+		}
+		usleep(1000);
+	}
+	assert(nt_connection_get_state(connection) == NT_CONNECTION_CLOSED);
+}
+
 int main(void) {
 	struct test_context context;
 	atomic_init(&context.readable_events, 0);
 	atomic_init(&context.peer_eof_events, 0);
 	atomic_init(&context.callback_error, false);
 	atomic_init(&context.first_handle, 0);
+	atomic_init(&context.close_requested, false);
 
 	nt_runtime_t *runtime = NULL;
 	nt_runtime_config_t config = {
@@ -160,10 +172,23 @@ int main(void) {
 	send_and_expect_echo(client, "second");
 	assert(atomic_load(&context.readable_events) >= 2);
 
-	shutdown(client, SHUT_WR);
+	assert(nt_runtime_request_close(runtime, handle) == 0);
+	nt_connection_t *connection = nt_runtime_find_connection(runtime, handle);
+	assert(connection != NULL);
+	wait_for_closed(connection);
+	assert(nt_runtime_find_connection(runtime, handle) == connection);
+
+	nt_runtime_stop(runtime);
 	assert(pthread_join(thread, NULL) == 0);
 	assert(!atomic_load(&context.callback_error));
-	assert(atomic_load(&context.peer_eof_events) == 1);
+	assert(atomic_load(&context.peer_eof_events) == 0);
+
+	errno = 0;
+	assert(nt_runtime_request_rearm(runtime, handle, false) == -1);
+	assert(errno == ECANCELED);
+	errno = 0;
+	assert(nt_runtime_request_close(runtime, handle) == -1);
+	assert(errno == ECANCELED);
 
 	close(client);
 	nt_runtime_destroy(runtime);
