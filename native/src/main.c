@@ -1,6 +1,7 @@
 #include "nt_jvm.h"
 #include "nt_runtime.h"
 #include "nt_connection.h"
+#include "nt_native_transport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,8 +75,18 @@ int main(void)
 			return EXIT_FAILURE;
 		}
 
+		status = nt_native_transport_bind_runtime(runtime);
+		if (status != 0) {
+			fprintf(stderr, "NativeTomcat: native transport binding failed: %s\n", strerror(errno));
+			nt_runtime_destroy(runtime);
+			nt_jvm_stop(jvm);
+			nt_jvm_destroy(jvm);
+			return EXIT_FAILURE;
+		}
+
 		status = nt_runtime_run(runtime);
 		int jvm_status = nt_jvm_stop(jvm);
+		(void)nt_native_transport_bind_runtime(NULL);
 		nt_runtime_destroy(runtime);
 		nt_jvm_destroy(jvm);
 		if (status != 0) {
