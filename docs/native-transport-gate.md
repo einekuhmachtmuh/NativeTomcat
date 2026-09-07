@@ -9,7 +9,7 @@ This document records the source-verified contract for the next NativeTomcat int
 - `NativeTransport.java` defines the intended Java/native transport boundary, but no JNI implementation is registered yet.
 - Native connection handles are stable `uint64_t` values and are looked up through the native runtime registry.
 - Native epoll uses `EPOLLIN | EPOLLRDHUP | EPOLLONESHOT`, with optional `EPOLLOUT`. `EPOLLONESHOT` is a NativeTomcat ownership choice; it is not a claim that NGINX uses the same epoll mode.
-- The native runtime has a thread-safe command queue and eventfd wake path for `REARM(handle, wantWrite)` and `CLOSE(handle)`. This is source-implemented but not yet locally compiled/runtime-tested in the current environment.
+- The native runtime has a thread-safe command queue and eventfd wake path for `REARM(handle, wantWrite)` and `CLOSE(handle)`. Submission is rejected after shutdown begins, and commands for one drained batch are coalesced so `CLOSE` dominates and only the final `REARM` state survives otherwise. This is source-implemented but not yet locally compiled/runtime-tested in the current environment.
 
 ## Tomcat contract
 
@@ -63,21 +63,13 @@ The native command queue is implemented at the runtime layer:
 2. Submission appends a command under `command_mutex` and wakes the native event loop through the existing `eventfd`.
 3. Only the native event-loop thread drains the queue and performs `epoll_ctl()` or native close.
 4. Commands use the stable connection handle; native lookup validates that the handle still belongs to the runtime and ignores stale/closed handles without dereferencing freed memory.
-5. Queue ordering is FIFO. A rearm and later close therefore cannot be reordered after they have entered the queue.
-6. Runtime shutdown currently discards queued commands before connection destruction.
+5. Within one drained batch, commands for the same handle are coalesced: a `CLOSE` dominates any `REARM`, otherwise only the final `REARM` state is retained. Relative order across distinct handles is preserved.
+6. Once `stop_requested` is set, new command submission is rejected with `ECANCELED`, including a second check while holding `command_mutex` to close the stop/enqueue race.
+7. Runtime shutdown discards commands before connection destruction; callers must not use the runtime after destruction.
 
-### Re-alignment found during source audit
+This is deliberately analogous to the pinned Tomcat `NioEndpoint.Poller`: Tomcat queues `PollerEvent`s, wakes the selector, and lets the poller thread apply registration/interest changes. NativeTomcat preserves that ownership pattern while replacing the Java `Selector` with the native epoll owner.
 
-The current implementation is **not yet sufficient to close the command-queue gate**. Source review found two verification/design gaps that must be fixed before JNI is added:
-
-- `nt_runtime_request_rearm()` / `nt_runtime_request_close()` currently do not reject a request after `nt_runtime_stop()` has begun. The run loop may discard such a command, so submission/shutdown semantics are not yet deterministic.
-- The current focused test proves cross-thread rearm through the queue, but does not yet prove `CLOSE` ownership, stale-handle rejection, shutdown race, or exactly-one terminal decision.
-
-Therefore these are the next coding/test gates; do not proceed to JNI merely because the queue compiles.
-
-The lifecycle fix must make command submission reject after shutdown begins, without introducing a runtime-pointer use-after-free. The stale-handle path must be safely ignored/rejected on the native event-loop side without dereferencing freed connections. Tests must exercise both command types and the shutdown boundary.
-
-This remains analogous to the pinned Tomcat `NioEndpoint.Poller`: Tomcat queues `PollerEvent`s, wakes the selector, and lets the poller thread apply registration/interest changes. NativeTomcat preserves that ownership pattern while replacing the Java `Selector` with the native epoll owner.
+The focused native test now covers both sides of the command boundary: the first connection event is consumed without a direct rearm from the event callback, the test thread submits `REARM(handle, false)`, a second request is processed, then the test thread submits `CLOSE(handle)` and verifies that the native connection reaches `CLOSED`. After `nt_runtime_stop()`, both request APIs are verified to reject with `ECANCELED`.
 
 ## Blocking-read requirement
 
@@ -95,7 +87,7 @@ This follows the pinned Tomcat NIO separation: `NioEndpoint.Poller.processKey()`
 
 ## Tomcat cross-check
 
-The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll.
+The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before processing, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll.
 
 ## NGINX cross-check
 
@@ -114,4 +106,4 @@ NGINX is an event-architecture reference only; it does not define Servlet semant
 
 ## Verification requirement
 
-Before this gate can be marked `implemented`, focused tests must cover at least: successful read, `WOULD_BLOCK`, EOF, EINTR, peer half-close, close/lifetime, blocking-read wakeup, exactly-one rearm, stale-handle rejection, shutdown race, and error propagation. The command-queue source is currently `implemented/source-verified`, but the current revision is **not yet `compiled` or `unit-tested`** because this environment has no usable local Git working tree and ordinary GitHub DNS remains unavailable. GitHub Actions also has no workflow run for the current commit. Ant compilation and runtime tests must therefore be run when an executable working tree/toolchain is available; prior PASS results from older revisions do not validate this gate.
+Before this gate can be marked `implemented`, focused tests must cover at least: successful read, `WOULD_BLOCK`, EOF, EINTR, peer half-close, close/lifetime, blocking-read wakeup, exactly-one rearm, stale-handle rejection, shutdown race, and error propagation. The command-queue source and focused close/shutdown tests are currently `implemented/source-verified`, but the current revision is **not yet `compiled` or `unit-tested`** because this environment has no usable local Git working tree and ordinary GitHub DNS remains unavailable. GitHub Actions must be checked for a run on the current commit; Ant compilation and runtime tests must still be run when an executable working tree/toolchain is available. Prior PASS results from older revisions do not validate this gate.
