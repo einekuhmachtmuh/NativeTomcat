@@ -83,15 +83,17 @@ A direct blocking `recv()` from a Java executor thread is forbidden. Native conn
 6. The wrapper retries the read; EOF and fatal error terminate the wait with the appropriate Java I/O result.
 7. The wait state must use a sequence/state transition so an event arriving just before `wait()` cannot be lost.
 
-This follows the pinned Tomcat NIO separation: `NioEndpoint.Poller.processKey()` handles readiness, clears the readiness registration before processing, and wakes `readBlocking` waiters via `readLock`; it does not perform the application read on behalf of the waiting Java thread. citeturn292file0turn293file0
+This follows the pinned Tomcat NIO separation: `NioEndpoint.Poller.processKey()` handles readiness, clears the readiness registration before processing, and wakes `readBlocking` waiters via `readLock`; it does not perform the application read on behalf of the waiting Java thread. Source: pinned Tomcat 11.0.25 `java/org/apache/tomcat/util/net/NioEndpoint.java`, blob `21b0cadbbb3ab04351415c0d7c127ab3500ace58`.
 
 ## Tomcat cross-check
 
-The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll. fileciteturn291file0turn292file0turn293file0
+The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller, and keeps selector registration/interest changes inside the Poller thread. `Poller.addEvent()` queues an interest change and calls `selector.wakeup()`. `processKey()` removes the ready operations before dispatch, then either wakes a blocking reader/writer or calls `processSocket()`. NativeTomcat must preserve these ownership and ordering semantics even though the native backend uses epoll. Source: pinned Tomcat 11.0.25 `NioEndpoint.java`, blob `21b0cadbbb3ab04351415c0d7c127ab3500ace58`.
 
 ## NGINX cross-check
 
-The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness; its generic event model tracks readiness/state independently. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` must be justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail. citeturn1view1
+The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness; its generic event model tracks readiness/state independently. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` must be justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail.
+
+Sources: official NGINX `src/event/ngx_event.c` and `src/event/ngx_event.h` on the NGINX repository.
 
 NGINX is an event-architecture reference only; it does not define Servlet semantics.
 
