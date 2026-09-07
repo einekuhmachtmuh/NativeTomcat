@@ -1,12 +1,13 @@
 # Native transport gate
 
-This document records the source-verified contract for the next NativeTomcat integration step. It is an implementation gate, not a claim that the transport bridge is complete.
+This document records the source-verified contract for the next NativeTomcat integration step. It is an implementation gate, not a claim that the transport path is runtime-verified.
 
 ## Current status
 
 - `SocketWrapperBase` is the pinned Tomcat 11.0.25 source at `cbe6e15ee81e2fc6232954292a80cca5d1e84009`; the repository copy is format-normalized and its content has been source-audited.
 - `NativeSocketWrapper` is still a surface checkpoint. Its real `read`, `doWrite`, `doClose`, and interest methods are not yet implemented.
-- `NativeTransport.java` defines the intended Java/native transport boundary, but no JNI implementation is registered yet.
+- `NativeTransport.java` defines the Java/native transport boundary. A JNI implementation now exists in `native/src/nt_native_transport.c`; it resolves active connections by stable handle and routes rearm/close through the native runtime command queue. It is source-implemented but not yet compiled or runtime-tested in the current environment.
+- The JNI transport runtime binding is protected by a read/write lock. The runtime remains bound through native event-loop execution and JVM shutdown, then is unbound before `nt_runtime_destroy()`. This prevents runtime destruction from racing an in-flight Java transport call.
 - Native connection handles are stable `uint64_t` values and are looked up through the native runtime registry.
 - Native epoll uses `EPOLLIN | EPOLLRDHUP | EPOLLONESHOT`, with optional `EPOLLOUT`. `EPOLLONESHOT` is a NativeTomcat ownership choice; it is not a claim that NGINX uses the same epoll mode.
 - The native runtime has a thread-safe command queue and eventfd wake path for `REARM(handle, wantWrite)` and `CLOSE(handle)`. Submission is rejected after shutdown begins, and commands for one drained batch are coalesced so `CLOSE` dominates and only the final `REARM` state survives otherwise. Connection epoll events carry stable handles rather than native object pointers, and closed handles are no longer returned by the active registry lookup. This is source-implemented but not yet locally compiled/runtime-tested in the current environment.
@@ -37,7 +38,7 @@ The pinned Tomcat 11.0.25 `NioEndpoint.NioSocketWrapper` was re-audited before a
 5. `doClose()` removes the connection from the endpoint registry, closes the channel, releases/reset buffers and cached channel state, and closes pending sendfile state. Native close therefore has to preserve both transport lifetime and Tomcat wrapper cleanup semantics.
 6. `isReadyForRead()` first exposes already-buffered application data and otherwise attempts a non-blocking fill; it is not equivalent to the native kernel `EPOLLIN` bit.
 
-The audit shows that the next implementation step is specifically **transport consumption plus wait/wakeup state**, not `Http11Processor` changes and not a new endpoint dispatch path.
+The audit shows that the next Java implementation step is specifically **transport consumption plus wait/wakeup state**, not `Http11Processor` changes and not a new endpoint dispatch path.
 
 ## Native ownership contract
 
@@ -49,7 +50,7 @@ The native event loop is the sole owner of:
 - native connection close/destroy;
 - native connection registry lifetime.
 
-A Java worker must not call `epoll_ctl()` directly. `NativeTransport.rearm()` must therefore enqueue a runtime command rather than become a direct worker-thread `epoll_ctl()` wrapper. Java-side `doClose()` likewise requests native close through the ownership boundary rather than freeing a connection object directly.
+A Java worker must not call `epoll_ctl()` directly. `NativeTransport.rearm()` now enqueues a runtime command rather than becoming a direct worker-thread `epoll_ctl()` wrapper. Java-side `doClose()` will likewise request native close through the ownership boundary rather than freeing a connection object directly.
 
 ## Required event cycle
 
@@ -109,7 +110,7 @@ The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller
 
 The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` is justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail.
 
-NGINX's developer documentation likewise describes read handlers as consuming available data until the socket reports `NGX_AGAIN`, then calling the read-event handling function to establish the next interest state. This supports the separation used here: readiness notification is not itself transport consumption or Servlet readiness.
+NGINX's developer documentation likewise describes read handlers as consuming available data until the socket reports `NGX_AGAIN`, then calling the read-event handling function to establish the next interest state. This supports the separation used here: readiness notification is not itself transport consumption or Servlet readiness. citeturn0search0turn0search1turn0search3
 
 NGINX is an event-architecture reference only; it does not define Servlet semantics.
 
@@ -119,9 +120,9 @@ NGINX is an event-architecture reference only; it does not define Servlet semant
 - no Servlet/TCK claim;
 - no TLS/sendfile/vector-I/O implementation;
 - no direct Java-thread `epoll_ctl()`;
-- no claim that JNI transport is implemented;
+- no claim that `NativeSocketWrapper` transport consumption is implemented;
 - no benchmark claim.
 
 ## Verification requirement
 
-Before this gate can be marked `implemented`, focused tests must cover at least: successful read, `WOULD_BLOCK`, EOF, EINTR, peer half-close, close/lifetime, blocking-read wakeup, exactly-one rearm, stale-handle rejection, shutdown race, and error propagation. The command-queue source and focused close/shutdown tests are currently `implemented/source-verified`, but the current revision is **not yet `compiled` or `unit-tested`** because this environment has no usable local Git working tree and ordinary GitHub DNS remains unavailable. GitHub Actions must be checked for a run on the current commit; Ant compilation and runtime tests must still be run when an executable working tree/toolchain is available. Prior PASS results from older revisions do not validate this gate.
+Before this gate can be marked `implemented`, focused tests must cover at least: successful read, `WOULD_BLOCK`, EOF, EINTR, peer half-close, close/lifetime, blocking-read wakeup, exactly-one rearm, stale-handle rejection, shutdown race, and error propagation. The runtime command queue and JNI ownership bridge are currently `implemented/source-verified`, but the current revision is **not yet `compiled` or `unit-tested`** because this environment has no usable local Git working tree and ordinary GitHub DNS remains unavailable. GitHub Actions was checked for the current commit and returned no workflow runs. Ant compilation and runtime tests must still be run when an executable working tree/toolchain is available. Prior PASS results from older revisions do not validate this gate.
