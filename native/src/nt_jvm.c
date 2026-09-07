@@ -177,11 +177,15 @@ static void *nt_jvm_thread_main(void *argument)
 		goto fail;
 	}
 
-	option.optionString = malloc(strlen(jvm->class_path) + 16);
+	option.optionString = malloc(strlen(jvm->class_path) + sizeof("-Djava.class.path="));
 	if (option.optionString == NULL) {
 		goto fail;
 	}
-	sprintf(option.optionString, "-Djava.class.path=%s", jvm->class_path);
+	if (snprintf(option.optionString, strlen(jvm->class_path) + sizeof("-Djava.class.path="),
+			"-Djava.class.path=%s", jvm->class_path) < 0) {
+		free(option.optionString);
+		goto fail;
+	}
 	option.extraInfo = NULL;
 
 	memset(&vm_args, 0, sizeof(vm_args));

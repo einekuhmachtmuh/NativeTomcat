@@ -239,10 +239,13 @@ static void nt_runtime_process_commands(nt_runtime_t *runtime)
 		} else if (command->close) {
 			existing->close = true;
 			existing->want_write = false;
+			free(command);
 		} else if (!existing->close) {
 			existing->want_write = command->want_write;
+			free(command);
+		} else {
+			free(command);
 		}
-		free(command);
 	}
 
 	struct nt_runtime_command *command = effective_head;

@@ -32,6 +32,8 @@
 	<property name="tomcat.expected.commit" value="cbe6e15ee81e2fc6232954292a80cca5d1e84009" />
 	<!-- Pinned LogFactory.java imports bnd's ServiceConsumer annotation. No local stub or source modification is permitted. -->
 	<property name="bnd.jar" value="${env.BND_JAR}" />
+	<!-- The migrated Tomcat Coyote sources compile against the Servlet 6.1 API. -->
+	<property name="servlet.api.jar" value="${env.SERVLET_API_JAR}" />
 
 	<target name="init"><mkdir dir="${native.java.classes}" /></target>
 
@@ -40,9 +42,17 @@
 		<fail unless="bnd.present" message="Missing bnd dependency for pinned LogFactory.java. Set BND_JAR or pass -Dbnd.jar=/path/to/biz.aQute.bnd-*.jar. Do not create a local annotation stub or modify the pinned source." />
 	</target>
 
-	<target name="java-compile" depends="init,verify-bnd-dependency" description="Formal build of the currently migrated NativeTomcat Java source slice">
+	<target name="verify-servlet-api-dependency" depends="init" description="Verify the external Jakarta Servlet 6.1 API required by migrated Coyote sources">
+		<available file="${servlet.api.jar}" property="servlet.api.present" />
+		<fail unless="servlet.api.present" message="Missing Jakarta Servlet 6.1 API dependency. Set SERVLET_API_JAR or pass -Dservlet.api.jar=/path/to/jakarta.servlet-api-6.1.x.jar." />
+	</target>
+
+	<target name="java-compile" depends="init,verify-bnd-dependency,verify-servlet-api-dependency" description="Formal build of the currently migrated NativeTomcat Java source slice">
 		<javac srcdir="${basedir}/java" destdir="${native.java.classes}" release="${java.source}" includeantruntime="false" debug="true" encoding="UTF-8">
-			<classpath><pathelement location="${bnd.jar}" /></classpath>
+			<classpath>
+				<pathelement location="${bnd.jar}" />
+				<pathelement location="${servlet.api.jar}" />
+			</classpath>
 			<include name="org/apache/tomcat/nativebootstrap/*.java" />
 			<include name="org/apache/tomcat/util/*.java" />
 			<include name="org/apache/tomcat/util/res/*.java" />
@@ -50,6 +60,9 @@
 			<include name="org/apache/juli/logging/*.java" />
 			<!-- Recursive net closure is required once pinned JSSE/cipher subpackages are present. -->
 			<include name="org/apache/tomcat/util/net/**/*.java" />
+			<!-- Panama OpenSSL sources require JDK 22+ and are outside the JDK 17 compatibility slice. -->
+			<exclude name="org/apache/tomcat/util/net/openssl/panama/**/*.java" />
+			<exclude name="org/apache/tomcat/util/openssl/**/*.java" />
 			<!-- NativeTomcat's protocol boundary reuses Tomcat's HTTP/1.1 processor implementation. -->
 			<include name="org/apache/coyote/**/*.java" />
 			<!-- NativeEndpoint is a NativeTomcat implementation boundary, not a copied Tomcat source file. -->
