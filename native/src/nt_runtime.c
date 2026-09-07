@@ -19,7 +19,7 @@
 
 struct nt_runtime_command {
 	uint64_t handle;
-	bool want_write;
+	unsigned interest_mask;
 	bool close;
 	struct nt_runtime_command *next;
 };
@@ -149,9 +149,10 @@ static int nt_runtime_wake(nt_runtime_t *runtime)
 	return -1;
 }
 
-static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bool want_write, bool close)
+static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, unsigned interest_mask, bool close)
 {
-	if (runtime == NULL || handle == 0 || (want_write && close)) {
+	if (runtime == NULL || handle == 0 || (interest_mask & ~(unsigned)(NT_RUNTIME_INTEREST_READ |
+			NT_RUNTIME_INTEREST_WRITE)) != 0 || (close && interest_mask != 0)) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -165,7 +166,7 @@ static int nt_runtime_enqueue_command(nt_runtime_t *runtime, uint64_t handle, bo
 		return -1;
 	}
 	command->handle = handle;
-	command->want_write = want_write;
+	command->interest_mask = interest_mask;
 	command->close = close;
 
 	if (pthread_mutex_lock(&runtime->command_mutex) != 0) {
@@ -238,10 +239,10 @@ static void nt_runtime_process_commands(nt_runtime_t *runtime)
 			effective_tail = command;
 		} else if (command->close) {
 			existing->close = true;
-			existing->want_write = false;
+			existing->interest_mask = 0;
 			free(command);
 		} else if (!existing->close) {
-			existing->want_write = command->want_write;
+			existing->interest_mask = command->interest_mask;
 			free(command);
 		} else {
 			free(command);
@@ -260,7 +261,7 @@ static void nt_runtime_process_commands(nt_runtime_t *runtime)
 				}
 				nt_connection_close(connection);
 			} else {
-				(void)nt_runtime_rearm_connection(runtime, connection, command->want_write);
+				(void)nt_runtime_rearm_connection(runtime, connection, command->interest_mask);
 			}
 		}
 		free(command);
@@ -441,9 +442,13 @@ nt_connection_t *nt_runtime_find_connection(nt_runtime_t *runtime, uint64_t hand
 	return result;
 }
 
-int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, bool want_write)
+int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connection, unsigned interest_mask)
 {
 	if (runtime == NULL || connection == NULL || nt_connection_get_runtime(connection) != runtime) {
+		errno = EINVAL;
+		return -1;
+	}
+	if ((interest_mask & ~(unsigned)(NT_RUNTIME_INTEREST_READ | NT_RUNTIME_INTEREST_WRITE)) != 0) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -454,22 +459,25 @@ int nt_runtime_rearm_connection(nt_runtime_t *runtime, nt_connection_t *connecti
 
 	struct epoll_event event;
 	memset(&event, 0, sizeof(event));
-	event.events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
-	if (want_write) {
+	event.events = EPOLLRDHUP | EPOLLONESHOT;
+	if ((interest_mask & NT_RUNTIME_INTEREST_READ) != 0) {
+		event.events |= EPOLLIN;
+	}
+	if ((interest_mask & NT_RUNTIME_INTEREST_WRITE) != 0) {
 		event.events |= EPOLLOUT;
 	}
 	event.data.u64 = nt_connection_get_handle(connection);
 	return epoll_ctl(runtime->epoll_fd, EPOLL_CTL_MOD, nt_connection_get_fd(connection), &event);
 }
 
-int nt_runtime_request_rearm(nt_runtime_t *runtime, uint64_t handle, bool want_write)
+int nt_runtime_request_rearm(nt_runtime_t *runtime, uint64_t handle, unsigned interest_mask)
 {
-	return nt_runtime_enqueue_command(runtime, handle, want_write, false);
+	return nt_runtime_enqueue_command(runtime, handle, interest_mask, false);
 }
 
 int nt_runtime_request_close(nt_runtime_t *runtime, uint64_t handle)
 {
-	return nt_runtime_enqueue_command(runtime, handle, false, true);
+	return nt_runtime_enqueue_command(runtime, handle, 0, true);
 }
 
 int nt_runtime_run(nt_runtime_t *runtime)
