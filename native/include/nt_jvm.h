@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef struct nt_runtime nt_runtime_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,6 +23,7 @@ int nt_jvm_stop(nt_jvm_t *jvm);
 void nt_jvm_destroy(nt_jvm_t *jvm);
 bool nt_jvm_is_ready(const nt_jvm_t *jvm);
 int nt_jvm_dispatch_event(nt_jvm_t *jvm, uint64_t connection_handle, unsigned events);
+int nt_jvm_bind_runtime(nt_jvm_t *jvm, nt_runtime_t *runtime);
 
 #ifdef __cplusplus
 }
