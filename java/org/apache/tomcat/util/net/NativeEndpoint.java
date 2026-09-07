@@ -23,183 +23,208 @@ import org.apache.tomcat.util.collections.SynchronizedStack;
  */
 public final class NativeEndpoint extends AbstractEndpoint<Long, Long> {
 
-    private static final Log log = LogFactory.getLog(NativeEndpoint.class);
+	private static final Log log = LogFactory.getLog(NativeEndpoint.class);
 
-    /**
-     * Create a native endpoint. The native runtime remains the accept owner.
-     */
-    public NativeEndpoint() {
-        // Do not create an Acceptor here. NioEndpoint creates and starts its
-        // Acceptor as part of its own startInternal() implementation. Native
-        // accept is owned exclusively by nt_runtime, so this endpoint must not
-        // create a second accept owner.
-    }
+	/**
+	 * Create a native endpoint. The native runtime remains the accept owner.
+	 */
+	public NativeEndpoint()
+	{
+		// Do not create an Acceptor here. NioEndpoint creates and starts its
+		// Acceptor as part of its own startInternal() implementation. Native
+		// accept is owned exclusively by nt_runtime, so this endpoint must not
+		// create a second accept owner.
+	}
 
-    /**
-     * Register a native connection with the Tomcat-side connection registry.
-     *
-     * @param nativeHandle Stable native connection handle
-     * @return The existing or newly created wrapper
-     */
-    public NativeSocketWrapper registerNativeConnection(long nativeHandle) {
-        if (nativeHandle == 0) {
-            throw new IllegalArgumentException("native connection handle must be non-zero");
-        }
+	/**
+	 * Register a native connection with the Tomcat-side connection registry.
+	 *
+	 * @param nativeHandle Stable native connection handle
+	 * @return The existing or newly created wrapper
+	 */
+	public NativeSocketWrapper registerNativeConnection(long nativeHandle)
+	{
+		if (nativeHandle == 0) {
+			throw new IllegalArgumentException("native connection handle must be non-zero");
+		}
 
-        SocketWrapperBase<Long> existing = connections.get(nativeHandle);
-        if (existing != null) {
-            return (NativeSocketWrapper) existing;
-        }
+		SocketWrapperBase<Long> existing = connections.get(nativeHandle);
+		if (existing != null) {
+			return (NativeSocketWrapper) existing;
+		}
 
-        NativeSocketWrapper created = new NativeSocketWrapper(nativeHandle, this);
-        SocketWrapperBase<Long> raced = connections.putIfAbsent(nativeHandle, created);
-        if (raced == null) {
-            return created;
-        }
-        created.close();
-        return (NativeSocketWrapper) raced;
-    }
+		NativeSocketWrapper created = new NativeSocketWrapper(nativeHandle, this);
+		SocketWrapperBase<Long> raced = connections.putIfAbsent(nativeHandle, created);
+		if (raced == null) {
+			return created;
+		}
+		created.close();
+		return (NativeSocketWrapper) raced;
+	}
 
-    /**
-     * Deliver a native readiness notification through Tomcat's normal
-     * SocketProcessor dispatch boundary.
-     *
-     * @param nativeHandle Stable native connection handle
-     * @param events Native runtime event mask
-     * @return {@code true} if processing was submitted successfully
-     */
-    public boolean processNativeEvent(long nativeHandle, int events) {
-        NativeSocketWrapper wrapper = registerNativeConnection(nativeHandle);
-        SocketEvent event = toSocketEvent(events);
-        if (event == null) {
-            return false;
-        }
-        // NativeEventDispatcher has already serialized and scheduled this task
-        // on the Tomcat Executor. Avoid a second executor hop here; process the
-        // real Tomcat SocketProcessorBase on the current executor worker.
-        return processSocket(wrapper, event, false);
-    }
+	/**
+	 * Deliver a native readiness notification through Tomcat's normal
+	 * SocketProcessor dispatch boundary.
+	 *
+	 * <p>Tomcat's NioEndpoint gives a blocking reader/writer precedence over
+	 * SocketProcessor dispatch: the poller wakes the waiter and only dispatches
+	 * an OPEN_READ/OPEN_WRITE processor when no corresponding blocking I/O is
+	 * waiting. NativeEndpoint preserves that distinction for native readiness.</p>
+	 *
+	 * @param nativeHandle Stable native connection handle
+	 * @param events Native runtime event mask
+	 * @return {@code true} if processing was submitted successfully
+	 */
+	public boolean processNativeEvent(long nativeHandle, int events)
+	{
+		NativeSocketWrapper wrapper = registerNativeConnection(nativeHandle);
+		boolean readBlocking = wrapper.isReadBlocking();
+		boolean writeBlocking = wrapper.isWriteBlocking();
 
-    private SocketEvent toSocketEvent(int events) {
-        // NativeTomcat's current event mask uses bit 0 for readable and bit 1
-        // for writable. EPOLLRDHUP is represented by PEER_READ_CLOSED (bit 2).
-        // As in the NGINX event layer, a peer half-close is still a read-side
-        // notification so that the transport layer can observe EOF cleanly.
-        if ((events & 0x8) != 0) {
-            return SocketEvent.ERROR;
-        }
-        if ((events & 0x1) != 0 || (events & 0x4) != 0) {
-            return SocketEvent.OPEN_READ;
-        }
-        if ((events & 0x2) != 0) {
-            return SocketEvent.OPEN_WRITE;
-        }
-        return null;
-    }
+		wrapper.processNativeEvent(events);
 
-    @Override
-    protected SocketProcessorBase<Long> createSocketProcessor(SocketWrapperBase<Long> socketWrapper, SocketEvent event) {
-        return new SocketProcessor(socketWrapper, event);
-    }
+		if ((events & 0x8) != 0) {
+			if (readBlocking || writeBlocking) {
+				return true;
+			}
+			return processSocket(wrapper, SocketEvent.ERROR, false);
+		}
 
-    @Override
-    public void bind() {
-        // The native runtime owns the listening socket. NativeEndpoint is only
-        // the Tomcat-side endpoint contract at this stage.
-    }
+		if ((events & 0x1) != 0 || (events & 0x4) != 0) {
+			if (!readBlocking) {
+				return processSocket(wrapper, SocketEvent.OPEN_READ, false);
+			}
+			if ((events & 0x2) == 0 || writeBlocking) {
+				return true;
+			}
+			return processSocket(wrapper, SocketEvent.OPEN_WRITE, false);
+		}
 
-    @Override
-    public void startInternal() {
-        if (!running) {
-            running = true;
-            paused = false;
-            if (processorCache == null && getSocketProperties().getProcessorCache() != 0) {
-                processorCache = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
-                        getSocketProperties().getProcessorCache());
-            }
-            if (getExecutor() == null) {
-                createExecutor();
-            }
-            initializeConnectionLatch();
-        }
-    }
+		if ((events & 0x2) != 0) {
+			if (writeBlocking) {
+				return true;
+			}
+			return processSocket(wrapper, SocketEvent.OPEN_WRITE, false);
+		}
 
-    @Override
-    public void stopInternal() {
-        if (running) {
-            running = false;
-            paused = true;
-            shutdownExecutor();
-            if (processorCache != null) {
-                processorCache.clear();
-                processorCache = null;
-            }
-        }
-    }
+		return false;
+	}
 
-    @Override
-    protected Log getLog() {
-        return log;
-    }
+	@Override
+	protected SocketProcessorBase<Long> createSocketProcessor(SocketWrapperBase<Long> socketWrapper, SocketEvent event)
+	{
+		return new SocketProcessor(socketWrapper, event);
+	}
 
-    @Override
-    protected InetSocketAddress getLocalAddress() throws IOException {
-        // The listening socket is owned by nt_runtime. Until the native
-        // listener-address bridge is added, there is no Java NetworkChannel
-        // from which AbstractEndpoint can obtain an address.
-        return null;
-    }
+	@Override
+	public void bind()
+	{
+		// The native runtime owns the listening socket. NativeEndpoint is only
+		// the Tomcat-side endpoint contract at this stage.
+	}
 
-    @Override
-    protected void doCloseServerSocket() throws IOException {
-        // No Java server socket exists. Native runtime owns this resource.
-    }
+	@Override
+	public void startInternal()
+	{
+		if (!running) {
+			running = true;
+			paused = false;
+			if (processorCache == null && getSocketProperties().getProcessorCache() != 0) {
+				processorCache = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
+						getSocketProperties().getProcessorCache());
+			}
+			if (getExecutor() == null) {
+				createExecutor();
+			}
+			initializeConnectionLatch();
+		}
+	}
 
-    @Override
-    protected Long serverSocketAccept() {
-        throw new UnsupportedOperationException("native runtime owns accept");
-    }
+	@Override
+	public void stopInternal()
+	{
+		if (running) {
+			running = false;
+			paused = true;
+			shutdownExecutor();
+			if (processorCache != null) {
+				processorCache.clear();
+				processorCache = null;
+			}
+		}
+	}
 
-    @Override
-    protected boolean setSocketOptions(Long socket) {
-        if (socket == null || socket.longValue() == 0) {
-            return false;
-        }
-        registerNativeConnection(socket.longValue());
-        return true;
-    }
+	@Override
+	protected Log getLog()
+	{
+		return log;
+	}
 
-    @Override
-    protected void destroySocket(Long socket) {
-        if (socket != null) {
-            SocketWrapperBase<Long> wrapper = connections.remove(socket);
-            if (wrapper != null) {
-                wrapper.close();
-            }
-        }
-    }
+	@Override
+	protected InetSocketAddress getLocalAddress() throws IOException
+	{
+		// The listening socket is owned by nt_runtime. Until the native
+		// listener-address bridge is added, there is no Java NetworkChannel
+		// from which AbstractEndpoint can obtain an address.
+		return null;
+	}
 
-    /**
-     * Tomcat-compatible processor using the exact SocketProcessorBase
-     * dispatch boundary. Native transport I/O remains a separate gate.
-     */
-    protected class SocketProcessor extends SocketProcessorBase<Long> {
+	@Override
+	protected void doCloseServerSocket() throws IOException
+	{
+		// No Java server socket exists. Native runtime owns this resource.
+	}
 
-        public SocketProcessor(SocketWrapperBase<Long> socketWrapper, SocketEvent event) {
-            super(socketWrapper, event);
-        }
+	@Override
+	protected Long serverSocketAccept()
+	{
+		throw new UnsupportedOperationException("native runtime owns accept");
+	}
 
-        @Override
-        protected void doRun() {
-            SocketWrapperBase<Long> wrapper = socketWrapper;
-            if (wrapper == null || wrapper.isClosed()) {
-                return;
-            }
+	@Override
+	protected boolean setSocketOptions(Long socket)
+	{
+		if (socket == null || socket.longValue() == 0) {
+			return false;
+		}
+		registerNativeConnection(socket.longValue());
+		return true;
+	}
 
-            Handler.SocketState state = getHandler().process(wrapper, event);
-            if (state == Handler.SocketState.CLOSED) {
-                wrapper.close();
-            }
-        }
-    }
+	@Override
+	protected void destroySocket(Long socket)
+	{
+		if (socket != null) {
+			SocketWrapperBase<Long> wrapper = connections.remove(socket);
+			if (wrapper != null) {
+				wrapper.close();
+			}
+		}
+	}
+
+	/**
+	 * Tomcat-compatible processor using the exact SocketProcessorBase
+	 * dispatch boundary. Native transport I/O remains a separate gate.
+	 */
+	protected class SocketProcessor extends SocketProcessorBase<Long> {
+
+		public SocketProcessor(SocketWrapperBase<Long> socketWrapper, SocketEvent event)
+		{
+			super(socketWrapper, event);
+		}
+
+		@Override
+		protected void doRun()
+		{
+			SocketWrapperBase<Long> wrapper = socketWrapper;
+			if (wrapper == null || wrapper.isClosed()) {
+				return;
+			}
+
+			Handler.SocketState state = getHandler().process(wrapper, event);
+			if (state == Handler.SocketState.CLOSED) {
+				wrapper.close();
+			}
+		}
+	}
 }
