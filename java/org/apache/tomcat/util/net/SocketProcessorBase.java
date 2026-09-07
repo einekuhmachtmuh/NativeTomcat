@@ -1,38 +1,86 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one or more
+ *  contributor license agreements.  See the NOTICE file distributed with
+ *  this work for additional information regarding copyright ownership.
+ *  The ASF licenses this file to You under the Apache License, Version 2.0
+ *  (the "License"); you may not use this file except in compliance with
+ *  the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
 package org.apache.tomcat.util.net;
 
+import java.util.Objects;
+import java.util.concurrent.locks.Lock;
+
 /**
- * Intermediate NativeTomcat copy of the Tomcat 11.0.25 SocketProcessorBase
- * execution surface. The lock ownership is intentionally preserved.
+ * Base class for socket processors that handle I/O events on a wrapped socket.
+ * Subclasses implement {@link #doRun()} to define the processing logic.
+ * @param <S> the type of the socket associated with the wrapper
  */
 public abstract class SocketProcessorBase<S> implements Runnable {
+
+    /**
+     * The socket wrapper that provides access to the underlying socket and its state.
+     */
     protected SocketWrapperBase<S> socketWrapper;
+
+    /**
+     * The event that triggered this processor (e.g., READ, WRITE).
+     */
     protected SocketEvent event;
 
-    protected SocketProcessorBase(SocketWrapperBase<S> socketWrapper, SocketEvent event) {
+    /**
+     * Creates a new socket processor for the given wrapper and event.
+     * @param socketWrapper the socket wrapper
+     * @param event the socket event to process
+     */
+    public SocketProcessorBase(SocketWrapperBase<S> socketWrapper, SocketEvent event) {
+        reset(socketWrapper, event);
+    }
+
+
+    /**
+     * Resets this processor with a new socket wrapper and event, allowing reuse.
+     * @param socketWrapper the socket wrapper
+     * @param event the socket event to process
+     */
+    public void reset(SocketWrapperBase<S> socketWrapper, SocketEvent event) {
+        Objects.requireNonNull(event);
         this.socketWrapper = socketWrapper;
         this.event = event;
     }
 
-    public void reset(SocketWrapperBase<S> socketWrapper, SocketEvent event) {
-        this.socketWrapper = socketWrapper;
-        this.event = event;
-    }
 
     @Override
     public final void run() {
-        SocketWrapperBase<S> wrapper = socketWrapper;
-        if (wrapper == null || wrapper.isClosed()) {
-            return;
-        }
-        wrapper.getLock().lock();
+        Lock lock = socketWrapper.getLock();
+        lock.lock();
         try {
-            if (!wrapper.isClosed()) {
-                doRun();
+            // It is possible that processing may be triggered for read and
+            // write at the same time. The lock above makes sure that processing
+            // does not occur in parallel. The test below ensures that if the
+            // first event to be processed results in the socket being closed,
+            // the subsequent events are not processed.
+            if (socketWrapper.isClosed()) {
+                return;
             }
+            doRun();
         } finally {
-            wrapper.getLock().unlock();
+            lock.unlock();
         }
     }
 
+
+    /**
+     * Performs the actual socket processing work. Subclasses implement this method to define
+     * the specific processing logic for each endpoint type.
+     */
     protected abstract void doRun();
 }
