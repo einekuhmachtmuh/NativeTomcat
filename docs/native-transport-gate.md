@@ -110,7 +110,7 @@ The pinned NIO source creates a `NioSocketWrapper`, registers it with the Poller
 
 The official NGINX event abstraction separates readiness, handler dispatch, and event-interest management. Its epoll definitions use `EPOLLIN | EPOLLRDHUP` for read readiness and `EPOLLOUT` for write readiness. NGINX currently uses `EPOLLET` as its epoll clear-event mode and leaves the `EPOLLONESHOT` definition disabled in the shown backend source. Therefore NativeTomcat's `EPOLLONESHOT` is justified by NativeTomcat's own ownership/lifecycle design, not presented as an NGINX implementation detail.
 
-NGINX's developer documentation likewise describes read handlers as consuming available data until the socket reports `NGX_AGAIN`, then calling the read-event handling function to establish the next interest state. This supports the separation used here: readiness notification is not itself transport consumption or Servlet readiness. citeturn0search0turn0search1turn0search3
+NGINX's developer documentation likewise describes read handlers as consuming available data until the socket reports `NGX_AGAIN`, then calling the read-event handling function to establish the next interest state. This supports the separation used here: readiness notification is not itself transport consumption or Servlet readiness.
 
 NGINX is an event-architecture reference only; it does not define Servlet semantics.
 
